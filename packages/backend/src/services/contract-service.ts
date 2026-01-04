@@ -4,7 +4,7 @@
  */
 
 import { ethers } from 'ethers';
-import { getNetworkConfig, getContractConfig, NetworkConfig } from '../config/contracts';
+import { getNetworkConfig, getContractConfig, NetworkConfig } from '../config/contracts.js';
 
 /**
  * Contract Service Class

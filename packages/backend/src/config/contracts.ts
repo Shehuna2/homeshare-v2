@@ -3,9 +3,9 @@
  * Contract addresses and ABIs for blockchain integration
  */
 
-import PropertyTokenAbi from '../../../contracts/abi/PropertyToken.json';
-import PropertyCrowdfundAbi from '../../../contracts/abi/PropertyCrowdfund.json';
-import ChainRegistryAbi from '../../../contracts/abi/ChainRegistry.json';
+import PropertyTokenAbi from '../../../contracts/abi/PropertyToken.json' with { type: 'json' };
+import PropertyCrowdfundAbi from '../../../contracts/abi/PropertyCrowdfund.json' with { type: 'json' };
+import ChainRegistryAbi from '../../../contracts/abi/ChainRegistry.json' with { type: 'json' };
 
 export interface ContractConfig {
   address: string;
