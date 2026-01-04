@@ -1,0 +1,26 @@
+{
+  "sepolia": {
+    "propertyToken": "",
+    "propertyCrowdfund": "",
+    "chainRegistry": "",
+    "deploymentBlock": 0,
+    "deploymentTx": "",
+    "deployedAt": ""
+  },
+  "base-sepolia": {
+    "propertyToken": "",
+    "propertyCrowdfund": "",
+    "chainRegistry": "",
+    "deploymentBlock": 0,
+    "deploymentTx": "",
+    "deployedAt": ""
+  },
+  "canton-testnet": {
+    "propertyToken": "",
+    "propertyCrowdfund": "",
+    "chainRegistry": "",
+    "deploymentBlock": 0,
+    "deploymentTx": "",
+    "deployedAt": ""
+  }
+}
