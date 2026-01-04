@@ -101,7 +101,12 @@ contract PropertyCrowdfund is Ownable, ReentrancyGuard {
         );
         
         campaign.isActive = false;
+        
+        bool isFunded = campaign.currentFunding >= campaign.fundingGoal;
         emit CampaignFinalized(campaignId, campaign.currentFunding);
+        
+        // In a complete implementation, handle refunds for failed campaigns here
+        // or distribute property tokens for successful campaigns
     }
     
     function getCampaignTokens(uint256 campaignId) 

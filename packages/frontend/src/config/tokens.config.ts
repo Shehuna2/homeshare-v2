@@ -51,7 +51,7 @@ export const BASE_ETH: Token = {
 };
 
 export const BASE_RIZE: Token = {
-  address: '0x0000000000000000000000000000000000000001', // Placeholder
+  address: '0x0000000000000000000000000000000000000000', // TODO: Replace with actual RIZE token address
   symbol: 'RIZE',
   name: 'Rize Token',
   decimals: 18,

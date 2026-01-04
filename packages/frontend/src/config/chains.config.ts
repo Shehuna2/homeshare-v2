@@ -29,13 +29,13 @@ export const BASE_MAINNET: Chain = {
 export const CANTON_NETWORK: Chain = {
   id: 9000,
   name: 'Canton',
-  rpcUrl: 'https://canton-rpc.example.com',
+  rpcUrl: import.meta.env.VITE_CANTON_RPC_URL || 'https://canton-rpc-placeholder.com', // Replace with actual RPC URL
   nativeCurrency: {
     name: 'Canton Coin',
     symbol: 'CC',
     decimals: 18,
   },
-  blockExplorer: 'https://canton-explorer.example.com',
+  blockExplorer: import.meta.env.VITE_CANTON_EXPLORER_URL || 'https://canton-explorer-placeholder.com', // Replace with actual explorer URL
   isTestnet: false,
 };
 
