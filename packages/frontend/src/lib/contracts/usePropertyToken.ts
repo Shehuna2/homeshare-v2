@@ -4,7 +4,7 @@
 
 import { useContractRead, useContractWrite, usePrepareContractWrite, useWaitForTransaction } from 'wagmi';
 import { PropertyTokenAbi } from './abi';
-import { getContractAddress } from './addresses';
+import { getContractAddress, ZERO_ADDRESS } from './addresses';
 
 /**
  * Hook to read PropertyToken contract data
@@ -29,7 +29,7 @@ export function usePropertyTokenBalance(chainId: number, account: string | undef
     abi,
     functionName: 'balanceOf',
     args: account ? [account as `0x${string}`] : undefined,
-    enabled: !!account && address !== '0x0000000000000000000000000000000000000000',
+    enabled: !!account && address !== ZERO_ADDRESS,
   });
 }
 
@@ -43,42 +43,42 @@ export function usePropertyTokenMetadata(chainId: number) {
     address,
     abi,
     functionName: 'name',
-    enabled: address !== '0x0000000000000000000000000000000000000000',
+    enabled: address !== ZERO_ADDRESS,
   });
 
   const { data: symbol } = useContractRead({
     address,
     abi,
     functionName: 'symbol',
-    enabled: address !== '0x0000000000000000000000000000000000000000',
+    enabled: address !== ZERO_ADDRESS,
   });
 
   const { data: decimals } = useContractRead({
     address,
     abi,
     functionName: 'decimals',
-    enabled: address !== '0x0000000000000000000000000000000000000000',
+    enabled: address !== ZERO_ADDRESS,
   });
 
   const { data: totalSupply } = useContractRead({
     address,
     abi,
     functionName: 'totalSupply',
-    enabled: address !== '0x0000000000000000000000000000000000000000',
+    enabled: address !== ZERO_ADDRESS,
   });
 
   const { data: propertyId } = useContractRead({
     address,
     abi,
     functionName: 'propertyId',
-    enabled: address !== '0x0000000000000000000000000000000000000000',
+    enabled: address !== ZERO_ADDRESS,
   });
 
   const { data: totalValue } = useContractRead({
     address,
     abi,
     functionName: 'totalValue',
-    enabled: address !== '0x0000000000000000000000000000000000000000',
+    enabled: address !== ZERO_ADDRESS,
   });
 
   return {
@@ -158,7 +158,7 @@ export function usePropertyTokenAllowance(
     abi,
     functionName: 'allowance',
     args: owner && spender ? [owner as `0x${string}`, spender as `0x${string}`] : undefined,
-    enabled: !!owner && !!spender && address !== '0x0000000000000000000000000000000000000000',
+    enabled: !!owner && !!spender && address !== ZERO_ADDRESS,
   });
 }
 
@@ -172,6 +172,6 @@ export function usePropertyTokenOwner(chainId: number) {
     address,
     abi,
     functionName: 'owner',
-    enabled: address !== '0x0000000000000000000000000000000000000000',
+    enabled: address !== ZERO_ADDRESS,
   });
 }

@@ -4,7 +4,7 @@
 
 import { useContractRead, useContractWrite, usePrepareContractWrite, useWaitForTransaction } from 'wagmi';
 import { PropertyCrowdfundAbi } from './abi';
-import { getContractAddress } from './addresses';
+import { getContractAddress, ZERO_ADDRESS } from './addresses';
 
 /**
  * Hook to get PropertyCrowdfund contract instance
@@ -28,7 +28,7 @@ export function useCampaignCount(chainId: number) {
     address,
     abi,
     functionName: 'campaignCount',
-    enabled: address !== '0x0000000000000000000000000000000000000000',
+    enabled: address !== ZERO_ADDRESS,
   });
 }
 
@@ -43,7 +43,7 @@ export function useCampaign(chainId: number, campaignId: number | undefined) {
     abi,
     functionName: 'campaigns',
     args: campaignId !== undefined ? [BigInt(campaignId)] : undefined,
-    enabled: campaignId !== undefined && address !== '0x0000000000000000000000000000000000000000',
+    enabled: campaignId !== undefined && address !== ZERO_ADDRESS,
   });
 }
 
@@ -58,7 +58,7 @@ export function useCampaignTokens(chainId: number, campaignId: number | undefine
     abi,
     functionName: 'getCampaignTokens',
     args: campaignId !== undefined ? [BigInt(campaignId)] : undefined,
-    enabled: campaignId !== undefined && address !== '0x0000000000000000000000000000000000000000',
+    enabled: campaignId !== undefined && address !== ZERO_ADDRESS,
   });
 }
 
@@ -83,7 +83,7 @@ export function useInvestment(
     enabled:
       campaignId !== undefined &&
       !!investor &&
-      address !== '0x0000000000000000000000000000000000000000',
+      address !== ZERO_ADDRESS,
   });
 }
 
@@ -175,6 +175,6 @@ export function usePropertyCrowdfundOwner(chainId: number) {
     address,
     abi,
     functionName: 'owner',
-    enabled: address !== '0x0000000000000000000000000000000000000000',
+    enabled: address !== ZERO_ADDRESS,
   });
 }

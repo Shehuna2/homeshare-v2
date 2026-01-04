@@ -4,7 +4,7 @@
 
 import { useContractRead, useContractWrite, usePrepareContractWrite, useWaitForTransaction } from 'wagmi';
 import { ChainRegistryAbi } from './abi';
-import { getContractAddress } from './addresses';
+import { getContractAddress, ZERO_ADDRESS } from './addresses';
 
 /**
  * Hook to get ChainRegistry contract instance
@@ -28,7 +28,7 @@ export function useSupportedChains(chainId: number) {
     address,
     abi,
     functionName: 'getSupportedChains',
-    enabled: address !== '0x0000000000000000000000000000000000000000',
+    enabled: address !== ZERO_ADDRESS,
   });
 }
 
@@ -43,7 +43,7 @@ export function useIsChainSupported(chainId: number, targetChainId: number | und
     abi,
     functionName: 'isChainSupported',
     args: targetChainId !== undefined ? [BigInt(targetChainId)] : undefined,
-    enabled: targetChainId !== undefined && address !== '0x0000000000000000000000000000000000000000',
+    enabled: targetChainId !== undefined && address !== ZERO_ADDRESS,
   });
 }
 
@@ -58,7 +58,7 @@ export function useChainInfo(chainId: number, targetChainId: number | undefined)
     abi,
     functionName: 'chains',
     args: targetChainId !== undefined ? [BigInt(targetChainId)] : undefined,
-    enabled: targetChainId !== undefined && address !== '0x0000000000000000000000000000000000000000',
+    enabled: targetChainId !== undefined && address !== ZERO_ADDRESS,
   });
 }
 
@@ -83,7 +83,7 @@ export function useIsTokenSupported(
     enabled:
       targetChainId !== undefined &&
       !!tokenAddress &&
-      address !== '0x0000000000000000000000000000000000000000',
+      address !== ZERO_ADDRESS,
   });
 }
 
@@ -201,6 +201,6 @@ export function useChainRegistryOwner(chainId: number) {
     address,
     abi,
     functionName: 'owner',
-    enabled: address !== '0x0000000000000000000000000000000000000000',
+    enabled: address !== ZERO_ADDRESS,
   });
 }

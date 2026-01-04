@@ -3,6 +3,8 @@
  * Environment-based contract address management
  */
 
+export const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as const;
+
 export interface ContractAddresses {
   PropertyToken: string;
   PropertyCrowdfund: string;
@@ -18,37 +20,37 @@ const SEPOLIA_ADDRESSES: ContractAddresses = {
 
 // Base Sepolia Testnet
 const BASE_SEPOLIA_ADDRESSES: ContractAddresses = {
-  PropertyToken: import.meta.env.VITE_BASE_SEPOLIA_PROPERTY_TOKEN || '0x0000000000000000000000000000000000000000',
-  PropertyCrowdfund: import.meta.env.VITE_BASE_SEPOLIA_PROPERTY_CROWDFUND || '0x0000000000000000000000000000000000000000',
-  ChainRegistry: import.meta.env.VITE_BASE_SEPOLIA_CHAIN_REGISTRY || '0x0000000000000000000000000000000000000000',
+  PropertyToken: import.meta.env.VITE_BASE_SEPOLIA_PROPERTY_TOKEN || ZERO_ADDRESS,
+  PropertyCrowdfund: import.meta.env.VITE_BASE_SEPOLIA_PROPERTY_CROWDFUND || ZERO_ADDRESS,
+  ChainRegistry: import.meta.env.VITE_BASE_SEPOLIA_CHAIN_REGISTRY || ZERO_ADDRESS,
 };
 
 // Canton Testnet
 const CANTON_TESTNET_ADDRESSES: ContractAddresses = {
-  PropertyToken: import.meta.env.VITE_CANTON_TESTNET_PROPERTY_TOKEN || '0x0000000000000000000000000000000000000000',
-  PropertyCrowdfund: import.meta.env.VITE_CANTON_TESTNET_PROPERTY_CROWDFUND || '0x0000000000000000000000000000000000000000',
-  ChainRegistry: import.meta.env.VITE_CANTON_TESTNET_CHAIN_REGISTRY || '0x0000000000000000000000000000000000000000',
+  PropertyToken: import.meta.env.VITE_CANTON_TESTNET_PROPERTY_TOKEN || ZERO_ADDRESS,
+  PropertyCrowdfund: import.meta.env.VITE_CANTON_TESTNET_PROPERTY_CROWDFUND || ZERO_ADDRESS,
+  ChainRegistry: import.meta.env.VITE_CANTON_TESTNET_CHAIN_REGISTRY || ZERO_ADDRESS,
 };
 
 // Ethereum Mainnet
 const ETHEREUM_ADDRESSES: ContractAddresses = {
-  PropertyToken: import.meta.env.VITE_ETHEREUM_PROPERTY_TOKEN || '0x0000000000000000000000000000000000000000',
-  PropertyCrowdfund: import.meta.env.VITE_ETHEREUM_PROPERTY_CROWDFUND || '0x0000000000000000000000000000000000000000',
-  ChainRegistry: import.meta.env.VITE_ETHEREUM_CHAIN_REGISTRY || '0x0000000000000000000000000000000000000000',
+  PropertyToken: import.meta.env.VITE_ETHEREUM_PROPERTY_TOKEN || ZERO_ADDRESS,
+  PropertyCrowdfund: import.meta.env.VITE_ETHEREUM_PROPERTY_CROWDFUND || ZERO_ADDRESS,
+  ChainRegistry: import.meta.env.VITE_ETHEREUM_CHAIN_REGISTRY || ZERO_ADDRESS,
 };
 
 // Base Mainnet
 const BASE_ADDRESSES: ContractAddresses = {
-  PropertyToken: import.meta.env.VITE_BASE_PROPERTY_TOKEN || '0x0000000000000000000000000000000000000000',
-  PropertyCrowdfund: import.meta.env.VITE_BASE_PROPERTY_CROWDFUND || '0x0000000000000000000000000000000000000000',
-  ChainRegistry: import.meta.env.VITE_BASE_CHAIN_REGISTRY || '0x0000000000000000000000000000000000000000',
+  PropertyToken: import.meta.env.VITE_BASE_PROPERTY_TOKEN || ZERO_ADDRESS,
+  PropertyCrowdfund: import.meta.env.VITE_BASE_PROPERTY_CROWDFUND || ZERO_ADDRESS,
+  ChainRegistry: import.meta.env.VITE_BASE_CHAIN_REGISTRY || ZERO_ADDRESS,
 };
 
 // Canton Mainnet
 const CANTON_ADDRESSES: ContractAddresses = {
-  PropertyToken: import.meta.env.VITE_CANTON_PROPERTY_TOKEN || '0x0000000000000000000000000000000000000000',
-  PropertyCrowdfund: import.meta.env.VITE_CANTON_PROPERTY_CROWDFUND || '0x0000000000000000000000000000000000000000',
-  ChainRegistry: import.meta.env.VITE_CANTON_CHAIN_REGISTRY || '0x0000000000000000000000000000000000000000',
+  PropertyToken: import.meta.env.VITE_CANTON_PROPERTY_TOKEN || ZERO_ADDRESS,
+  PropertyCrowdfund: import.meta.env.VITE_CANTON_PROPERTY_CROWDFUND || ZERO_ADDRESS,
+  ChainRegistry: import.meta.env.VITE_CANTON_CHAIN_REGISTRY || ZERO_ADDRESS,
 };
 
 /**
@@ -91,9 +93,9 @@ export function getContractAddress(
   const addresses = CONTRACT_ADDRESSES[chainId];
   if (!addresses) {
     console.warn(`No contract addresses found for chain ID: ${chainId}`);
-    return '0x0000000000000000000000000000000000000000';
+    return ZERO_ADDRESS;
   }
-  return addresses[contractName] || '0x0000000000000000000000000000000000000000';
+  return addresses[contractName] || ZERO_ADDRESS;
 }
 
 /**
@@ -104,13 +106,14 @@ export function areContractsDeployed(chainId: number): boolean {
   if (!addresses) return false;
   
   return (
-    addresses.PropertyToken !== '0x0000000000000000000000000000000000000000' &&
-    addresses.PropertyCrowdfund !== '0x0000000000000000000000000000000000000000' &&
-    addresses.ChainRegistry !== '0x0000000000000000000000000000000000000000'
+    addresses.PropertyToken !== ZERO_ADDRESS &&
+    addresses.PropertyCrowdfund !== ZERO_ADDRESS &&
+    addresses.ChainRegistry !== ZERO_ADDRESS
   );
 }
 
 export default {
+  ZERO_ADDRESS,
   CONTRACT_ADDRESSES,
   getContractAddresses,
   getContractAddress,

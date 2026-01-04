@@ -213,6 +213,12 @@ export class ContractService {
     toBlock: number | string = 'latest'
   ): Promise<ethers.EventLog[]> {
     const contract = this.getContract(network, contractName);
+    
+    // Validate event exists in contract
+    if (!contract.filters[eventName]) {
+      throw new Error(`Event ${eventName} not found in contract ${contractName}`);
+    }
+    
     const filter = contract.filters[eventName]();
     const events = await contract.queryFilter(filter, fromBlock, toBlock);
     return events as ethers.EventLog[];
