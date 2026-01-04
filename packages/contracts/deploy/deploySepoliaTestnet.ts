@@ -1,6 +1,7 @@
 import { ethers } from "hardhat";
 import * as fs from "fs";
 import * as path from "path";
+import { DeploymentInfo, TestnetAddresses } from "./types";
 
 async function main() {
   console.log("Deploying contracts to Ethereum Sepolia Testnet...");
@@ -68,7 +69,7 @@ async function main() {
   }
 
   const addressesFile = path.join(deploymentsDir, "testnet-addresses.json");
-  let allAddresses: any = {};
+  let allAddresses: TestnetAddresses = {};
   
   if (fs.existsSync(addressesFile)) {
     allAddresses = JSON.parse(fs.readFileSync(addressesFile, "utf8"));

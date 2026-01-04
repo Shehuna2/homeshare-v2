@@ -10,9 +10,6 @@
     "deploy:ethereum": "hardhat run deploy/deployEthereum.ts --network ethereum",
     "deploy:base": "hardhat run deploy/deployBase.ts --network base",
     "deploy:canton": "hardhat run deploy/deployCanton.ts --network canton",
-    "verify:sepolia": "hardhat verify --network sepolia",
-    "verify:base-sepolia": "hardhat verify --network base-sepolia",
-    "verify:canton-testnet": "hardhat verify --network canton-testnet",
     "clean": "hardhat clean"
   },
   "devDependencies": {
