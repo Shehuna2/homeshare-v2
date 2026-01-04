@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 
-const router = Router();
+const router: Router = Router();
 
 // POST /api/auth/login - Web3 wallet login
 router.post('/login', async (req: Request, res: Response) => {

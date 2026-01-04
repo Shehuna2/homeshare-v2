@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 
-const router = Router();
+const router: Router = Router();
 
 // GET /api/properties - List all properties
 router.get('/', async (req: Request, res: Response) => {

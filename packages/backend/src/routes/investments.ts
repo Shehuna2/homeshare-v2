@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 
-const router = Router();
+const router: Router = Router();
 
 // GET /api/investments - List user investments
 router.get('/', async (req: Request, res: Response) => {

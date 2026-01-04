@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 
-const router = Router();
+const router: Router = Router();
 
 // GET /api/tokens - List tokens by chain
 router.get('/', async (req: Request, res: Response) => {
