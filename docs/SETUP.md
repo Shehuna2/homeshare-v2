@@ -60,7 +60,7 @@ cd ../backend
 cp .env.example .env
 ```
 
-Edit `.env` and configure:
+Edit `.env` and configure (the server logs warnings for missing or placeholder values on boot):
 - Database connection string
 - RPC URLs for each chain
 - JWT secret
