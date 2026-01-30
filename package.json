@@ -14,7 +14,8 @@
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
     "clean": "pnpm -r clean && rm -rf node_modules",
-    "install:all": "pnpm install"
+    "install:all": "pnpm install",
+    "sync:testnet-addresses": "node scripts/sync-testnet-addresses.mjs"
   },
   "devDependencies": {
     "typescript": "^5.3.3"

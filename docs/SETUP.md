@@ -32,6 +32,12 @@ This will install dependencies for all packages in the monorepo.
 
 ### 3. Setup Environment Variables
 
+You can bootstrap the environment files from the repo root:
+
+```bash
+./scripts/phase1-setup.sh
+```
+
 #### Frontend
 
 ```bash
@@ -51,10 +57,10 @@ VITE_SUPPORTED_CHAINS=ethereum,base,canton
 
 ```bash
 cd ../backend
-cp .env.example .env.local
+cp .env.example .env
 ```
 
-Edit `.env.local` and configure:
+Edit `.env` and configure (the server logs warnings for missing or placeholder values on boot):
 - Database connection string
 - RPC URLs for each chain
 - JWT secret
@@ -64,13 +70,19 @@ Edit `.env.local` and configure:
 
 ```bash
 cd ../contracts
-cp .env.example .env.local
+cp .env.example .env
 ```
 
-Edit `.env.local`:
+Edit `.env`:
 - Add RPC URLs for networks
 - Add private key for deployment (NEVER commit this!)
 - Add API keys for contract verification
+
+After deploying to testnets, sync the new contract addresses into frontend/backend env files:
+
+```bash
+pnpm sync:testnet-addresses
+```
 
 ### 4. Setup Database
 
@@ -80,7 +92,7 @@ Edit `.env.local`:
 # Create database
 createdb homeshare
 
-# Update DATABASE_URL in backend/.env.local
+# Update DATABASE_URL in backend/.env
 DATABASE_URL=postgresql://username:password@localhost:5432/homeshare
 ```
 
