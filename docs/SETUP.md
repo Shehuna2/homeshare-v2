@@ -78,6 +78,12 @@ Edit `.env`:
 - Add private key for deployment (NEVER commit this!)
 - Add API keys for contract verification
 
+After deploying to testnets, sync the new contract addresses into frontend/backend env files:
+
+```bash
+pnpm sync:testnet-addresses
+```
+
 ### 4. Setup Database
 
 #### Using PostgreSQL directly
