@@ -19,6 +19,18 @@ export interface PropertyPayload {
   status?: 'draft' | 'funding' | 'funded';
 }
 
+export interface PropertyResponse {
+  id: string;
+  name: string;
+  description: string;
+  location: string;
+  totalValue: number;
+  tokenSupply: number;
+  chain: string;
+  status: 'draft' | 'funding' | 'funded';
+  createdAt: string;
+}
+
 export async function loginWithWallet(payload: {
   address: string;
   signature: string;
@@ -54,4 +66,15 @@ export async function createProperty(payload: PropertyPayload, token: string) {
   }
 
   return response.json();
+}
+
+export async function fetchProperties(): Promise<PropertyResponse[]> {
+  const response = await fetch(`${env.API_BASE_URL}/properties`);
+
+  if (!response.ok) {
+    throw new Error('Failed to fetch properties');
+  }
+
+  const data = await response.json();
+  return data.properties ?? [];
 }
