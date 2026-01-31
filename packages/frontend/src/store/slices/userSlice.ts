@@ -27,6 +27,9 @@ const userSlice = createSlice({
       state.role = action.payload.role;
       state.token = action.payload.token;
     },
+    setWalletAddress: (state, action: PayloadAction<string | null>) => {
+      state.address = action.payload;
+    },
     clearUser: (state) => {
       state.address = null;
       state.isAuthenticated = false;
@@ -36,5 +39,5 @@ const userSlice = createSlice({
   },
 });
 
-export const { setUser, clearUser } = userSlice.actions;
+export const { setUser, setWalletAddress, clearUser } = userSlice.actions;
 export default userSlice.reducer;

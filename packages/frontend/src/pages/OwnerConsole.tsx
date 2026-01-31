@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
+import { useAccount, useSignMessage } from 'wagmi';
 import { RootState } from '../store';
 import { setUser, clearUser } from '../store/slices/userSlice';
 import { createProperty, loginWithWallet } from '../lib/api';
@@ -7,6 +8,8 @@ import { createProperty, loginWithWallet } from '../lib/api';
 export default function OwnerConsole() {
   const dispatch = useDispatch();
   const { address, role, token, isAuthenticated } = useSelector((state: RootState) => state.user);
+  const { address: walletAddress } = useAccount();
+  const { signMessageAsync, isLoading: isSigning } = useSignMessage();
   const [loginForm, setLoginForm] = useState({
     address: '',
     signature: '',
@@ -24,6 +27,12 @@ export default function OwnerConsole() {
   });
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+
+  useEffect(() => {
+    if (walletAddress && walletAddress !== loginForm.address) {
+      setLoginForm((prev) => ({ ...prev, address: walletAddress }));
+    }
+  }, [walletAddress, loginForm.address]);
 
   const handleLoginChange = (field: keyof typeof loginForm, value: string) => {
     setLoginForm((prev) => ({ ...prev, [field]: value }));
@@ -60,6 +69,24 @@ export default function OwnerConsole() {
   const handleLogout = () => {
     dispatch(clearUser());
     setStatusMessage('Logged out.');
+  };
+
+  const handleSignMessage = async () => {
+    if (!loginForm.address) {
+      setErrorMessage('Connect a wallet first.');
+      return;
+    }
+
+    setErrorMessage('');
+    setStatusMessage('Waiting for signature...');
+    try {
+      const signature = await signMessageAsync({ message: loginForm.message });
+      setLoginForm((prev) => ({ ...prev, signature }));
+      setStatusMessage('Message signed. Ready to authenticate.');
+    } catch (error) {
+      setErrorMessage((error as Error).message);
+      setStatusMessage('');
+    }
   };
 
   const handleCreateProperty = async () => {
@@ -134,6 +161,13 @@ export default function OwnerConsole() {
               <option value="investor">Investor</option>
             </select>
             <div className="flex flex-wrap gap-3">
+              <button
+                className="border border-primary-600 text-primary-700 dark:text-primary-300 px-6 py-2 rounded-lg"
+                onClick={handleSignMessage}
+                disabled={isSigning}
+              >
+                {isSigning ? 'Signing...' : 'Sign Message'}
+              </button>
               <button
                 className="bg-primary-600 text-white px-6 py-2 rounded-lg hover:bg-primary-700"
                 onClick={handleLogin}
