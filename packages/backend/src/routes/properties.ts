@@ -1,12 +1,12 @@
 import { Router, Request, Response } from 'express';
-import { createProperty, getPropertyById, listProperties } from '../services/data-store.js';
+import { Property } from '../models/index.js';
 
 const router: Router = Router();
 
 // GET /api/properties - List all properties
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const properties = listProperties();
+    const properties = await Property.findAll({ order: [['createdAt', 'DESC']] });
     res.json({ properties });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch properties' });
@@ -17,7 +17,7 @@ router.get('/', async (req: Request, res: Response) => {
 router.get('/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const property = getPropertyById(id);
+    const property = await Property.findByPk(id);
     if (!property) {
       return res.status(404).json({ error: 'Property not found' });
     }
@@ -43,7 +43,7 @@ router.post('/', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid numeric values for totalValue or tokenSupply' });
     }
 
-    const property = createProperty({
+    const property = await Property.create({
       name,
       location,
       description,

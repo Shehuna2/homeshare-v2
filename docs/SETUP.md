@@ -253,7 +253,6 @@ pnpm lint
 
 ```bash
 cd packages/backend
-# Run migrations (when implemented)
 pnpm migrate
 ```
 

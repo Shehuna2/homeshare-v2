@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { createInvestment, listInvestments, getPropertyById } from '../services/data-store.js';
+import { Investment, Property } from '../models/index.js';
 
 const router: Router = Router();
 
@@ -7,7 +7,10 @@ const router: Router = Router();
 router.get('/', async (req: Request, res: Response) => {
   try {
     const investor = req.query.investor?.toString();
-    const investments = listInvestments(investor);
+    const investments = await Investment.findAll({
+      where: investor ? { investor } : undefined,
+      order: [['createdAt', 'DESC']],
+    });
     res.json({ investments });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch investments' });
@@ -23,7 +26,7 @@ router.post('/', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing required investment fields' });
     }
 
-    const property = getPropertyById(propertyId);
+    const property = await Property.findByPk(propertyId);
     if (!property) {
       return res.status(404).json({ error: 'Property not found' });
     }
@@ -35,7 +38,7 @@ router.post('/', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Invalid numeric values for amount or tokenAmount' });
     }
 
-    const investment = createInvestment({
+    const investment = await Investment.create({
       propertyId,
       investor,
       amount: parsedAmount,
