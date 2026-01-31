@@ -217,7 +217,15 @@ GET /api/investments
       "amount": 1000,
       "tokenAmount": 100,
       "chain": "sepolia",
-      "createdAt": "2024-01-01T00:00:00.000Z"
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "contractMetadata": {
+        "name": "Sepolia Property Token",
+        "symbol": "SPT",
+        "decimals": "18",
+        "totalSupply": "100000000000000000000000",
+        "propertyId": "property-sepolia-1",
+        "totalValue": "1000000000000000000000000"
+      }
     }
   ]
 }

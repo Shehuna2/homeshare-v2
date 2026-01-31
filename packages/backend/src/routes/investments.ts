@@ -1,7 +1,20 @@
 import { Router, Request, Response } from 'express';
 import { Investment, Property } from '../models/index.js';
+import { ContractService } from '../services/contract-service.js';
 
 const router: Router = Router();
+const contractService = new ContractService();
+
+const formatMetadata = (metadata: Awaited<ReturnType<ContractService['getPropertyTokenMetadata']>>) => {
+  return {
+    name: metadata.name,
+    symbol: metadata.symbol,
+    decimals: metadata.decimals.toString(),
+    totalSupply: metadata.totalSupply.toString(),
+    propertyId: metadata.propertyId,
+    totalValue: metadata.totalValue.toString(),
+  };
+};
 
 // GET /api/investments - List user investments
 router.get('/', async (req: Request, res: Response) => {
@@ -11,7 +24,18 @@ router.get('/', async (req: Request, res: Response) => {
       where: investor ? { investor } : undefined,
       order: [['createdAt', 'DESC']],
     });
-    res.json({ investments });
+    const enriched = await Promise.all(
+      investments.map(async (investment) => {
+        const data = investment.toJSON();
+        try {
+          const metadata = await contractService.getPropertyTokenMetadata(investment.chain);
+          return { ...data, contractMetadata: formatMetadata(metadata) };
+        } catch (metadataError) {
+          return { ...data, contractMetadata: null };
+        }
+      })
+    );
+    res.json({ investments: enriched });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch investments' });
   }
