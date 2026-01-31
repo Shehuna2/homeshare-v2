@@ -64,49 +64,30 @@ GET /health
 
 ### List Properties
 
-Get all properties across all chains.
+Get all properties across all chains. In the current development build, this endpoint returns in-memory records created during runtime.
 
 ```http
 GET /api/properties
 ```
 
-**Query Parameters:**
-- `chainId` (optional): Filter by chain ID
-- `isActive` (optional): Filter by active status
-- `page` (optional): Page number (default: 1)
-- `limit` (optional): Items per page (default: 10)
+**Query Parameters:** none
 
 **Response:**
 ```json
 {
   "properties": [
     {
-      "id": "prop-1",
+      "id": "property_1700000000000_1234",
       "name": "Luxury Apartment Downtown",
       "description": "Modern 2BR apartment in city center",
       "location": "New York, NY",
-      "imageUrl": "https://...",
-      "totalValue": "1000000",
-      "targetFunding": "500000",
-      "currentFunding": "250000",
-      "tokenSupply": "100000",
-      "tokenPrice": "10",
-      "chainId": 1,
-      "contractAddress": "0x...",
-      "owner": "0x...",
-      "isActive": true,
-      "fundingDeadline": 1705334400,
-      "expectedReturn": 8.5,
-      "createdAt": 1705075200,
-      "updatedAt": 1705075200
+      "totalValue": 1000000,
+      "tokenSupply": 100000,
+      "chain": "sepolia",
+      "status": "draft",
+      "createdAt": "2024-01-01T00:00:00.000Z"
     }
-  ],
-  "pagination": {
-    "page": 1,
-    "limit": 10,
-    "total": 25,
-    "pages": 3
-  }
+  ]
 }
 ```
 
@@ -122,31 +103,22 @@ GET /api/properties/:id
 ```json
 {
   "property": {
-    "id": "prop-1",
+    "id": "property_1700000000000_1234",
     "name": "Luxury Apartment Downtown",
     "description": "Modern 2BR apartment in city center",
     "location": "New York, NY",
-    "imageUrl": "https://...",
-    "totalValue": "1000000",
-    "targetFunding": "500000",
-    "currentFunding": "250000",
-    "tokenSupply": "100000",
-    "tokenPrice": "10",
-    "chainId": 1,
-    "contractAddress": "0x...",
-    "owner": "0x...",
-    "isActive": true,
-    "fundingDeadline": 1705334400,
-    "expectedReturn": 8.5,
-    "createdAt": 1705075200,
-    "updatedAt": 1705075200
+    "totalValue": 1000000,
+    "tokenSupply": 100000,
+    "chain": "sepolia",
+    "status": "draft",
+    "createdAt": "2024-01-01T00:00:00.000Z"
   }
 }
 ```
 
 ### Create Property
 
-Create a new property. Requires authentication and owner role.
+Create a new property.
 
 ```http
 POST /api/properties
@@ -158,24 +130,26 @@ POST /api/properties
   "name": "Luxury Apartment Downtown",
   "description": "Modern 2BR apartment in city center",
   "location": "New York, NY",
-  "imageUrl": "https://...",
-  "totalValue": "1000000",
-  "targetFunding": "500000",
-  "tokenSupply": "100000",
-  "chainId": 1,
-  "fundingDeadline": 1705334400,
-  "expectedReturn": 8.5
+  "totalValue": 1000000,
+  "tokenSupply": 100000,
+  "chain": "sepolia",
+  "status": "draft"
 }
 ```
 
 **Response:**
 ```json
 {
-  "message": "Property created successfully",
   "property": {
-    "id": "prop-1",
-    "contractAddress": "0x...",
-    ...
+    "id": "property_1700000000000_1234",
+    "name": "Luxury Apartment Downtown",
+    "description": "Modern 2BR apartment in city center",
+    "location": "New York, NY",
+    "totalValue": 1000000,
+    "tokenSupply": 100000,
+    "chain": "sepolia",
+    "status": "draft",
+    "createdAt": "2024-01-01T00:00:00.000Z"
   }
 }
 ```
@@ -186,55 +160,35 @@ POST /api/properties
 
 ### List User Investments
 
-Get all investments for the authenticated user.
+Get all investments. In the current development build, you can optionally filter by investor.
 
 ```http
 GET /api/investments
 ```
 
 **Query Parameters:**
-- `chainId` (optional): Filter by chain ID
-- `propertyId` (optional): Filter by property
-- `page` (optional): Page number
-- `limit` (optional): Items per page
+- `investor` (optional): Filter by investor wallet address
 
 **Response:**
 ```json
 {
   "investments": [
     {
-      "id": "inv-1",
-      "propertyId": "prop-1",
-      "investor": "0x...",
-      "amount": "1000",
-      "tokenAmount": "100",
-      "tokenAddress": "0x...",
-      "chainId": 1,
-      "timestamp": 1705075200,
-      "txHash": "0x..."
+      "id": "investment_1700000000000_1234",
+      "propertyId": "property_1700000000000_1234",
+      "investor": "0x1234...",
+      "amount": 1000,
+      "tokenAmount": 100,
+      "chain": "sepolia",
+      "createdAt": "2024-01-01T00:00:00.000Z"
     }
-  ],
-  "summary": {
-    "totalInvested": "5000",
-    "totalProperties": 3,
-    "totalReturns": "450",
-    "byChain": {
-      "1": {
-        "invested": "3000",
-        "properties": 2
-      },
-      "8453": {
-        "invested": "2000",
-        "properties": 1
-      }
-    }
-  }
+  ]
 }
 ```
 
 ### Record Investment
 
-Record a new investment. Called after blockchain transaction succeeds.
+Record a new investment.
 
 ```http
 POST /api/investments
@@ -243,22 +197,25 @@ POST /api/investments
 **Request Body:**
 ```json
 {
-  "propertyId": "prop-1",
-  "amount": "1000",
-  "tokenAmount": "100",
-  "tokenAddress": "0x...",
-  "chainId": 1,
-  "txHash": "0x..."
+  "propertyId": "property_1700000000000_1234",
+  "investor": "0x1234...",
+  "amount": 1000,
+  "tokenAmount": 100,
+  "chain": "sepolia"
 }
 ```
 
 **Response:**
 ```json
 {
-  "message": "Investment recorded successfully",
   "investment": {
-    "id": "inv-1",
-    ...
+    "id": "investment_1700000000000_1234",
+    "propertyId": "property_1700000000000_1234",
+    "investor": "0x1234...",
+    "amount": 1000,
+    "tokenAmount": 100,
+    "chain": "sepolia",
+    "createdAt": "2024-01-01T00:00:00.000Z"
   }
 }
 ```
