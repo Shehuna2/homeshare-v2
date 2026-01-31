@@ -28,19 +28,43 @@ export interface NetworkConfig {
 /**
  * Get contract addresses from environment variables
  */
-function getContractAddresses(network: string) {
+function getContractAddresses(
+  network: string,
+  defaults?: {
+    PropertyToken: string;
+    PropertyCrowdfund: string;
+    ChainRegistry: string;
+  }
+) {
   const prefix = network.toUpperCase().replace(/-/g, '_');
   
   return {
-    PropertyToken: process.env[`${prefix}_PROPERTY_TOKEN`] || '0x0000000000000000000000000000000000000000',
-    PropertyCrowdfund: process.env[`${prefix}_PROPERTY_CROWDFUND`] || '0x0000000000000000000000000000000000000000',
-    ChainRegistry: process.env[`${prefix}_CHAIN_REGISTRY`] || '0x0000000000000000000000000000000000000000',
+    PropertyToken:
+      process.env[`${prefix}_PROPERTY_TOKEN`] ||
+      defaults?.PropertyToken ||
+      '0x0000000000000000000000000000000000000000',
+    PropertyCrowdfund:
+      process.env[`${prefix}_PROPERTY_CROWDFUND`] ||
+      defaults?.PropertyCrowdfund ||
+      '0x0000000000000000000000000000000000000000',
+    ChainRegistry:
+      process.env[`${prefix}_CHAIN_REGISTRY`] ||
+      defaults?.ChainRegistry ||
+      '0x0000000000000000000000000000000000000000',
   };
 }
 
 /**
  * Network configurations
  */
+const sepoliaDefaults = {
+  PropertyToken: '0x24e580A700C2cE6a324A32b8a9f4f0d20EC5b020',
+  PropertyCrowdfund: '0x705ca8D85C32Cd4D6456bf59F0Ed2F5e358D8062',
+  ChainRegistry: '0xD368b35D0beaCe446E6e174D420DB2E65F6b2fE0',
+};
+
+const sepoliaAddresses = getContractAddresses('sepolia', sepoliaDefaults);
+
 export const NETWORKS: Record<string, NetworkConfig> = {
   // Testnets
   sepolia: {
@@ -50,17 +74,17 @@ export const NETWORKS: Record<string, NetworkConfig> = {
     blockExplorer: 'https://sepolia.etherscan.io',
     contracts: {
       PropertyToken: {
-        address: '0x24e580A700C2cE6a324A32b8a9f4f0d20EC5b020',
+        address: sepoliaAddresses.PropertyToken,
         abi: PropertyTokenAbi,
         deploymentBlock: 9979967,
       },
       PropertyCrowdfund: {
-        address: '0x705ca8D85C32Cd4D6456bf59F0Ed2F5e358D8062',
+        address: sepoliaAddresses.PropertyCrowdfund,
         abi: PropertyCrowdfundAbi,
         deploymentBlock: 9979967,
       },
       ChainRegistry: {
-        address: '0xD368b35D0beaCe446E6e174D420DB2E65F6b2fE0',
+        address: sepoliaAddresses.ChainRegistry,
         abi: ChainRegistryAbi,
         deploymentBlock: 9979967,
       },
