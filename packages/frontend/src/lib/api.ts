@@ -78,3 +78,29 @@ export async function fetchProperties(): Promise<PropertyResponse[]> {
   const data = await response.json();
   return data.properties ?? [];
 }
+
+export interface InvestmentResponse {
+  id: string;
+  propertyId: string;
+  investor: string;
+  amount: number;
+  tokenAmount: number;
+  chain: string;
+  createdAt: string;
+}
+
+export async function fetchInvestments(investor?: string): Promise<InvestmentResponse[]> {
+  const url = new URL(`${env.API_BASE_URL}/investments`);
+  if (investor) {
+    url.searchParams.set('investor', investor);
+  }
+
+  const response = await fetch(url.toString());
+
+  if (!response.ok) {
+    throw new Error('Failed to fetch investments');
+  }
+
+  const data = await response.json();
+  return data.investments ?? [];
+}
