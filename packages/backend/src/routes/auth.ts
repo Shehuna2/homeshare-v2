@@ -4,17 +4,19 @@ import jwt from 'jsonwebtoken';
 import { User } from '../models/index.js';
 import { env } from '../config/env.js';
 import { auth, AuthenticatedRequest } from '../middleware/auth.js';
+import { loginSchema } from '../validators/auth.js';
 
 const router: Router = Router();
 
 // POST /api/auth/login - Web3 wallet login
 router.post('/login', async (req: Request, res: Response) => {
   try {
-    const { address, signature, message, role } = req.body;
-
-    if (!address || !signature || !message) {
-      return res.status(400).json({ error: 'Missing login parameters' });
+    const parsed = loginSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid login payload' });
     }
+
+    const { address, signature, message, role } = parsed.data;
 
     const recovered = ethers.verifyMessage(message, signature);
     if (recovered.toLowerCase() !== address.toLowerCase()) {
