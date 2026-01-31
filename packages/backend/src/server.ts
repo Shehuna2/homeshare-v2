@@ -1,11 +1,18 @@
-import dotenv from 'dotenv';
 import app from './app.js';
+import { env, validateEnv } from './config/env.js';
+import { initDatabase } from './db/index.js';
 
-dotenv.config();
+async function startServer(): Promise<void> {
+  validateEnv();
+  await initDatabase();
 
-const PORT = process.env.PORT || 3000;
+  app.listen(env.port, () => {
+    console.log(`Server running on port ${env.port}`);
+    console.log(`Health check: http://localhost:${env.port}/health`);
+  });
+}
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
+startServer().catch((error) => {
+  console.error('Failed to start server:', error);
+  process.exit(1);
 });
