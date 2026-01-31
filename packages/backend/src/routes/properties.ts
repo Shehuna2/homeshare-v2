@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { Property } from '../models/index.js';
+import { auth, requireRole } from '../middleware/auth.js';
 
 const router: Router = Router();
 
@@ -28,7 +29,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 });
 
 // POST /api/properties - Create new property
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', auth, requireRole('owner'), async (req: Request, res: Response) => {
   try {
     const { name, location, description, totalValue, tokenSupply, chain, status } = req.body;
 

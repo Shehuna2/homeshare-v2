@@ -25,7 +25,9 @@ POST /api/auth/login
 ```json
 {
   "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
-  "signature": "0x..."
+  "signature": "0x...",
+  "message": "Sign-in request for Homeshare",
+  "role": "owner"
 }
 ```
 
@@ -34,8 +36,27 @@ POST /api/auth/login
 {
   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
   "user": {
+    "id": "uuid",
     "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
-    "isOwner": false
+    "role": "owner"
+  }
+}
+```
+
+### Verify Token
+
+```http
+POST /api/auth/verify
+```
+
+**Response:**
+```json
+{
+  "valid": true,
+  "user": {
+    "id": "uuid",
+    "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb",
+    "role": "owner"
   }
 }
 ```
@@ -64,7 +85,7 @@ GET /health
 
 ### List Properties
 
-Get all properties across all chains. In the current development build, this endpoint returns in-memory records created during runtime.
+Get all properties across all chains. In the current development build, this endpoint returns database records created during runtime.
 
 ```http
 GET /api/properties
@@ -118,7 +139,7 @@ GET /api/properties/:id
 
 ### Create Property
 
-Create a new property.
+Create a new property. Requires an authenticated owner token.
 
 ```http
 POST /api/properties
