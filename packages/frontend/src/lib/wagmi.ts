@@ -1,5 +1,5 @@
 import { configureChains, createConfig } from 'wagmi';
-import { injected } from 'wagmi/connectors';
+import { InjectedConnector } from 'wagmi/connectors/injected';
 import { sepolia, baseSepolia } from 'wagmi/chains';
 import { publicProvider } from 'wagmi/providers/public';
 
@@ -10,7 +10,7 @@ const { chains, publicClient, webSocketPublicClient } = configureChains(
 
 export const wagmiConfig = createConfig({
   autoConnect: true,
-  connectors: [injected({ chains })],
+  connectors: [new InjectedConnector({ chains })],
   publicClient,
   webSocketPublicClient,
 });
