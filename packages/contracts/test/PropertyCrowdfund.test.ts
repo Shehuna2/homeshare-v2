@@ -5,6 +5,20 @@ import { time } from "@nomicfoundation/hardhat-toolbox/network-helpers";
 const ONE_USDC = 1_000_000n;
 
 describe("PropertyCrowdfund", function () {
+  async function expectRevert(promise: Promise<unknown>, message?: string) {
+    try {
+      await promise;
+    } catch (error) {
+      if (message) {
+        const reason = (error as Error).message;
+        expect(reason).to.include(message);
+      }
+      return;
+    }
+
+    expect.fail("Expected transaction to revert");
+  }
+
   async function deployFixture() {
     const [admin, investor1, investor2, recipient] = await ethers.getSigners();
 
@@ -84,7 +98,8 @@ describe("PropertyCrowdfund", function () {
     await crowdfund.finalizeCampaign();
 
     await crowdfund.connect(admin).withdrawFunds(recipient.address);
-    await expect(crowdfund.connect(admin).withdrawFunds(recipient.address)).to.be.revertedWith(
+    await expectRevert(
+      crowdfund.connect(admin).withdrawFunds(recipient.address),
       "Campaign not successful"
     );
   });
@@ -112,6 +127,6 @@ describe("PropertyCrowdfund", function () {
 
     expect(await equity.balanceOf(investor1.address)).to.equal(expectedInvestor1);
     expect(await equity.balanceOf(investor2.address)).to.equal(expectedInvestor2);
-    expect(expectedInvestor1 + expectedInvestor2).to.be.at.most(totalEquityTokens);
+    expect(expectedInvestor1 + expectedInvestor2 <= totalEquityTokens).to.equal(true);
   });
 });
