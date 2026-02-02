@@ -172,11 +172,20 @@ describe("PropertyCrowdfund", function () {
   });
 
   it("reverts invest before start time", async function () {
-    const { investor1, usdc, crowdfund, startTime } = await deployWithSchedule(100, 200);
+    const { investor1, usdc, crowdfund } = await deployWithSchedule(3600, 7200);
 
     await usdc.connect(investor1).approve(crowdfund.target, ONE_USDC);
-    await time.increaseTo(startTime - 1);
     await expectRevert(crowdfund.connect(investor1).invest(ONE_USDC), "NOT_STARTED");
+  });
+
+  it("allows invest once start time is reached", async function () {
+    const { investor1, usdc, crowdfund, startTime } = await deployWithSchedule(3600, 7200);
+
+    await usdc.connect(investor1).approve(crowdfund.target, ONE_USDC);
+    await time.increaseTo(startTime + 1);
+    await crowdfund.connect(investor1).invest(ONE_USDC);
+
+    expect(await crowdfund.raisedAmountUSDC()).to.equal(ONE_USDC);
   });
 
   it("reverts invest after end time", async function () {
@@ -322,35 +331,91 @@ describe("PropertyCrowdfund", function () {
   });
 
   it("distributes pro-rata tokens with leftover in contract", async function () {
-    const { admin, investor1, investor2, usdc, equity, crowdfund, totalEquityTokens } =
-      await deployFixture();
-    const [, , investor3] = await ethers.getSigners();
+    const [admin, investor1, investor2, investor3] = await ethers.getSigners();
+    const MockERC20 = await ethers.getContractFactory("MockERC20");
+    const usdc = await MockERC20.deploy("USD Coin", "USDC", 6);
+    const equity = await MockERC20.deploy("Equity Token", "EQT", 18);
 
+    const now = await time.latest();
+    const startTime = now - 10;
+    const endTime = now + 1000;
+    const targetAmount = 3n * ONE_USDC;
+    const totalEquityTokens = ethers.parseUnits("100", 18);
+
+    const Crowdfund = await ethers.getContractFactory("PropertyCrowdfund");
+    const crowdfund = await Crowdfund.deploy(
+      admin.address,
+      usdc.target,
+      targetAmount,
+      startTime,
+      endTime,
+      totalEquityTokens,
+      "PROP-1"
+    );
+
+    await usdc.mint(investor1.address, 10n * ONE_USDC);
+    await usdc.mint(investor2.address, 10n * ONE_USDC);
     await usdc.mint(investor3.address, 10n * ONE_USDC);
 
-    await usdc.connect(investor1).approve(crowdfund.target, 10n * ONE_USDC);
-    await usdc.connect(investor2).approve(crowdfund.target, 10n * ONE_USDC);
-    await usdc.connect(investor3).approve(crowdfund.target, 10n * ONE_USDC);
+    await usdc.connect(investor1).approve(crowdfund.target, ONE_USDC);
+    await usdc.connect(investor2).approve(crowdfund.target, ONE_USDC);
+    await usdc.connect(investor3).approve(crowdfund.target, ONE_USDC);
     await crowdfund.connect(investor1).invest(ONE_USDC);
-    await crowdfund.connect(investor2).invest(2n * ONE_USDC);
+    await crowdfund.connect(investor2).invest(ONE_USDC);
     await crowdfund.connect(investor3).invest(ONE_USDC);
 
     await crowdfund.finalizeCampaign();
     await crowdfund.connect(admin).setEquityToken(equity.target);
     await equity.mint(crowdfund.target, totalEquityTokens);
 
-    const totalRaised = await crowdfund.raisedAmountUSDC();
-    const expected1 = (totalEquityTokens * ONE_USDC) / totalRaised;
-    const expected2 = (totalEquityTokens * (2n * ONE_USDC)) / totalRaised;
-    const expected3 = (totalEquityTokens * ONE_USDC) / totalRaised;
+    const expectedEach = ethers.parseUnits("33", 18);
 
     await crowdfund.connect(investor1).claimTokens();
     await crowdfund.connect(investor2).claimTokens();
     await crowdfund.connect(investor3).claimTokens();
 
-    const claimedTotal = expected1 + expected2 + expected3;
-    expect(claimedTotal <= totalEquityTokens).to.equal(true);
-    expect(await equity.balanceOf(crowdfund.target)).to.equal(totalEquityTokens - claimedTotal);
+    expect(await equity.balanceOf(investor1.address)).to.equal(expectedEach);
+    expect(await equity.balanceOf(investor2.address)).to.equal(expectedEach);
+    expect(await equity.balanceOf(investor3.address)).to.equal(expectedEach);
+    expect(await equity.balanceOf(crowdfund.target)).to.equal(ethers.parseUnits("1", 18));
+  });
+
+  it("reverts when entitlement rounds down to zero", async function () {
+    const [admin, investor1, investor2] = await ethers.getSigners();
+    const MockERC20 = await ethers.getContractFactory("MockERC20");
+    const usdc = await MockERC20.deploy("USD Coin", "USDC", 6);
+    const equity = await MockERC20.deploy("Equity Token", "EQT", 18);
+
+    const now = await time.latest();
+    const startTime = now - 10;
+    const endTime = now + 1000;
+    const targetAmount = 2n * ONE_USDC;
+    const totalEquityTokens = 1n;
+
+    const Crowdfund = await ethers.getContractFactory("PropertyCrowdfund");
+    const crowdfund = await Crowdfund.deploy(
+      admin.address,
+      usdc.target,
+      targetAmount,
+      startTime,
+      endTime,
+      totalEquityTokens,
+      "PROP-1"
+    );
+
+    await usdc.mint(investor1.address, 10n * ONE_USDC);
+    await usdc.mint(investor2.address, 10n * ONE_USDC);
+
+    await usdc.connect(investor1).approve(crowdfund.target, ONE_USDC);
+    await usdc.connect(investor2).approve(crowdfund.target, ONE_USDC);
+    await crowdfund.connect(investor1).invest(ONE_USDC);
+    await crowdfund.connect(investor2).invest(ONE_USDC);
+
+    await crowdfund.finalizeCampaign();
+    await crowdfund.connect(admin).setEquityToken(equity.target);
+    await equity.mint(crowdfund.target, totalEquityTokens);
+
+    await expectRevert(crowdfund.connect(investor1).claimTokens(), "No tokens claimable");
   });
 
   it("blocks reentrancy during refund via malicious token", async function () {
