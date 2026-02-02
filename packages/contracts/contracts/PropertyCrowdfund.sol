@@ -192,6 +192,15 @@ contract PropertyCrowdfund is Ownable, ReentrancyGuard {
     function setEquityToken(address equityTokenAddress) external onlyOwner {
         require(equityTokenAddress != address(0), "Invalid equity token");
         require(equityToken == address(0), "Equity token already set");
+        require(
+            _state == CampaignState.SUCCESS || _state == CampaignState.WITHDRAWN,
+            "Campaign not successful"
+        );
+        require(
+            IERC20(equityTokenAddress).balanceOf(address(this)) >=
+                totalEquityTokensForSale,
+            "INSUFFICIENT_EQUITY_BALANCE"
+        );
 
         equityToken = equityTokenAddress;
         emit EquityTokenSet(equityTokenAddress);
@@ -210,6 +219,10 @@ contract PropertyCrowdfund is Ownable, ReentrancyGuard {
 
         uint256 amount = claimableTokens(msg.sender);
         require(amount > 0, "No tokens claimable");
+        require(
+            IERC20(equityToken).balanceOf(address(this)) >= amount,
+            "INSUFFICIENT_EQUITY_BALANCE"
+        );
 
         _claimedTokens[msg.sender] += amount;
         IERC20(equityToken).safeTransfer(msg.sender, amount);

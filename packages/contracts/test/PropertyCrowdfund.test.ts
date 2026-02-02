@@ -264,6 +264,64 @@ describe("PropertyCrowdfund", function () {
     );
   });
 
+  it("requires equity token balance before setting equity token", async function () {
+    const [admin, investor1, investor2, investor3] = await ethers.getSigners();
+    const MockERC20 = await ethers.getContractFactory("MockERC20");
+    const usdc = await MockERC20.deploy("USD Coin", "USDC", 6);
+    const EquityToken = await ethers.getContractFactory("EquityToken");
+
+    const now = await time.latest();
+    const startTime = now - 10;
+    const endTime = now + 1000;
+    const targetAmount = 3n * ONE_USDC;
+    const totalEquityTokens = ethers.parseUnits("100", 18);
+
+    const Crowdfund = await ethers.getContractFactory("PropertyCrowdfund");
+    const crowdfund = await Crowdfund.deploy(
+      admin.address,
+      usdc.target,
+      targetAmount,
+      startTime,
+      endTime,
+      totalEquityTokens,
+      "PROP-1"
+    );
+
+    await usdc.mint(investor1.address, 10n * ONE_USDC);
+    await usdc.mint(investor2.address, 10n * ONE_USDC);
+    await usdc.mint(investor3.address, 10n * ONE_USDC);
+
+    await usdc.connect(investor1).approve(crowdfund.target, ONE_USDC);
+    await usdc.connect(investor2).approve(crowdfund.target, ONE_USDC);
+    await usdc.connect(investor3).approve(crowdfund.target, ONE_USDC);
+    await crowdfund.connect(investor1).invest(ONE_USDC);
+    await crowdfund.connect(investor2).invest(ONE_USDC);
+    await crowdfund.connect(investor3).invest(ONE_USDC);
+
+    await crowdfund.finalizeCampaign();
+
+    const equity = await EquityToken.deploy(
+      "Equity Token",
+      "EQT",
+      "PROP-1",
+      admin.address,
+      admin.address,
+      totalEquityTokens
+    );
+
+    await expectRevert(
+      crowdfund.connect(admin).setEquityToken(equity.target),
+      "INSUFFICIENT_EQUITY_BALANCE"
+    );
+
+    await equity.connect(admin).transfer(crowdfund.target, totalEquityTokens);
+    await crowdfund.connect(admin).setEquityToken(equity.target);
+
+    await crowdfund.connect(investor1).claimTokens();
+    await crowdfund.connect(investor2).claimTokens();
+    await crowdfund.connect(investor3).claimTokens();
+  });
+
   it("reverts withdraw when campaign not successful", async function () {
     const { admin, crowdfund } = await deployFixture();
 
