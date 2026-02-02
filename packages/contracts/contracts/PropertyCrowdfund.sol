@@ -123,7 +123,7 @@ contract PropertyCrowdfund is Ownable, ReentrancyGuard {
      */
     function invest(uint256 amountUSDC) external nonReentrant {
         require(_state == CampaignState.ACTIVE, "Campaign not active");
-        require(block.timestamp >= startTime, "Campaign not started");
+        require(block.timestamp >= startTime, "NOT_STARTED");
         require(block.timestamp < endTime, "Campaign ended");
         require(amountUSDC > 0, "Amount must be > 0");
 

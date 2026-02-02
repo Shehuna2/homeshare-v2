@@ -176,7 +176,7 @@ describe("PropertyCrowdfund", function () {
 
     await usdc.connect(investor1).approve(crowdfund.target, ONE_USDC);
     await time.increaseTo(startTime - 1);
-    await expectRevert(crowdfund.connect(investor1).invest(ONE_USDC), "Campaign not started");
+    await expectRevert(crowdfund.connect(investor1).invest(ONE_USDC), "NOT_STARTED");
   });
 
   it("reverts invest after end time", async function () {
@@ -328,9 +328,9 @@ describe("PropertyCrowdfund", function () {
 
     await usdc.mint(investor3.address, 10n * ONE_USDC);
 
-    await usdc.connect(investor1).approve(crowdfund.target, ONE_USDC);
-    await usdc.connect(investor2).approve(crowdfund.target, 2n * ONE_USDC);
-    await usdc.connect(investor3).approve(crowdfund.target, ONE_USDC);
+    await usdc.connect(investor1).approve(crowdfund.target, 10n * ONE_USDC);
+    await usdc.connect(investor2).approve(crowdfund.target, 10n * ONE_USDC);
+    await usdc.connect(investor3).approve(crowdfund.target, 10n * ONE_USDC);
     await crowdfund.connect(investor1).invest(ONE_USDC);
     await crowdfund.connect(investor2).invest(2n * ONE_USDC);
     await crowdfund.connect(investor3).invest(ONE_USDC);
