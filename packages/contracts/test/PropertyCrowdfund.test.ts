@@ -368,7 +368,9 @@ describe("PropertyCrowdfund", function () {
     await crowdfund.connect(admin).setEquityToken(equity.target);
     await equity.mint(crowdfund.target, totalEquityTokens);
 
-    const expectedEach = ethers.parseUnits("33", 18);
+    const expectedEach = totalEquityTokens / 3n;
+    const expectedTotalClaimed = expectedEach * 3n;
+    const expectedLeftover = totalEquityTokens - expectedTotalClaimed;
 
     await crowdfund.connect(investor1).claimTokens();
     await crowdfund.connect(investor2).claimTokens();
@@ -377,7 +379,8 @@ describe("PropertyCrowdfund", function () {
     expect(await equity.balanceOf(investor1.address)).to.equal(expectedEach);
     expect(await equity.balanceOf(investor2.address)).to.equal(expectedEach);
     expect(await equity.balanceOf(investor3.address)).to.equal(expectedEach);
-    expect(await equity.balanceOf(crowdfund.target)).to.equal(ethers.parseUnits("1", 18));
+    expect(expectedEach + expectedEach + expectedEach).to.equal(expectedTotalClaimed);
+    expect(await equity.balanceOf(crowdfund.target)).to.equal(expectedLeftover);
   });
 
   it("reverts when entitlement rounds down to zero", async function () {
