@@ -43,12 +43,12 @@ contract PropertyCrowdfund is Ownable, ReentrancyGuard {
 
     /**
      * @param admin Campaign owner with withdrawal rights.
-     * @param usdcToken Address of USDC token contract.
-     * @param targetAmountUSDC Target raise in USDC smallest units (6 decimals).
-     * @param startTime Campaign start timestamp.
-     * @param endTime Campaign end timestamp.
-     * @param totalEquityTokensForSale Total equity tokens allocated for sale (18 decimals).
-     * @param propertyId Off-chain identifier for the property.
+     * @param usdcTokenAddress Address of USDC token contract.
+     * @param targetAmountUSDCAmount Target raise in USDC smallest units (6 decimals).
+     * @param startTimestamp Campaign start timestamp.
+     * @param endTimestamp Campaign end timestamp.
+     * @param totalEquityTokens Total equity tokens allocated for sale (18 decimals).
+     * @param propertyIdValue Off-chain identifier for the property.
      */
     constructor(
         address admin,
@@ -187,7 +187,7 @@ contract PropertyCrowdfund is Ownable, ReentrancyGuard {
 
     /**
      * @notice Set equity token once; tokens must be transferred to this contract separately.
-     * @param equityToken Address of the equity ERC20 token.
+     * @param equityTokenAddress Address of the equity ERC20 token.
      */
     function setEquityToken(address equityTokenAddress) external onlyOwner {
         require(equityTokenAddress != address(0), "Invalid equity token");
