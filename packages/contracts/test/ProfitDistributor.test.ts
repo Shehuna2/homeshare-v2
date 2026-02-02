@@ -8,6 +8,20 @@ function computeExpected(amountUSDC: bigint, balance: bigint, supply: bigint) {
 }
 
 describe("ProfitDistributor", function () {
+  async function expectRevert(promise: Promise<unknown>, message?: string) {
+    try {
+      await promise;
+    } catch (error) {
+      if (message) {
+        const reason = (error as Error).message;
+        expect(reason).to.include(message);
+      }
+      return;
+    }
+
+    expect.fail("Expected transaction to revert");
+  }
+
   it("reverts deposit when equity supply is zero", async function () {
     const [admin] = await ethers.getSigners();
     const MockERC20 = await ethers.getContractFactory("MockERC20");
@@ -20,7 +34,7 @@ describe("ProfitDistributor", function () {
     await usdc.mint(admin.address, 10n * ONE_USDC);
     await usdc.connect(admin).approve(distributor.target, 10n * ONE_USDC);
 
-    await expect(distributor.connect(admin).deposit(ONE_USDC)).to.be.revertedWith("NO_SUPPLY");
+    await expectRevert(distributor.connect(admin).deposit(ONE_USDC), "NO_SUPPLY");
   });
 
   it("distributes a single deposit 70/30", async function () {
@@ -180,7 +194,7 @@ describe("ProfitDistributor", function () {
     await distributor.connect(admin).deposit(depositAmount);
 
     await distributor.connect(holderA).claim();
-    await expect(distributor.connect(holderA).claim()).to.be.revertedWith("NO_CLAIMABLE");
+    await expectRevert(distributor.connect(holderA).claim(), "NO_CLAIMABLE");
   });
 
   it("prevents non-owner deposits", async function () {
@@ -205,7 +219,8 @@ describe("ProfitDistributor", function () {
     await usdc.mint(attacker.address, ONE_USDC);
     await usdc.connect(attacker).approve(distributor.target, ONE_USDC);
 
-    await expect(distributor.connect(attacker).deposit(ONE_USDC)).to.be.revertedWith(
+    await expectRevert(
+      distributor.connect(attacker).deposit(ONE_USDC),
       "OwnableUnauthorizedAccount"
     );
   });
