@@ -164,15 +164,18 @@ export class Indexer {
 
     const distributorAddresses = distributors.map((d) => d.contract_address);
 
-    const profitLogs = await this.fetchLogs(
-      distributorAddresses.length > 0 ? distributorAddresses : undefined,
-      [
-        this.profitInterface.getEvent('Deposited').topicHash,
-        this.profitInterface.getEvent('Claimed').topicHash,
-      ],
-      fromBlock,
-      toBlock
-    );
+    const profitLogs =
+      distributorAddresses.length > 0
+        ? await this.fetchLogs(
+            distributorAddresses,
+            [
+              this.profitInterface.getEvent('Deposited').topicHash,
+              this.profitInterface.getEvent('Claimed').topicHash,
+            ],
+            fromBlock,
+            toBlock
+          )
+        : [];
 
     const affectedCampaigns = new Set<string>();
 
@@ -268,30 +271,46 @@ export class Indexer {
             inserts.campaignsUpdated += 1;
             break;
           }
-          case 'TokensClaimed': {
-            const investor = String(parsed.args.investor).toLowerCase();
-            const amount = parsed.args.amountEquityTokens as bigint;
-            const equityTokenId = await this.lookupEquityTokenId(transaction, campaign.property_id);
-            if (!equityTokenId) {
-              continue;
-            }
-            inserts.equityClaims += await this.insertEquityClaim(
+          case 'EquityTokenSet': {
+            const tokenAddress = String(parsed.args.equityToken).toLowerCase();
+            await this.ensureEquityToken(
               transaction,
-              campaign,
-              equityTokenId,
               chainId,
-              investor,
-              amount,
-              log
+              campaign.property_id,
+              tokenAddress,
+              log,
+              contractAddress
             );
             break;
           }
-          case 'EquityTokenSet': {
-            const tokenAddress = String(parsed.args.equityToken).toLowerCase();
-            await this.ensureEquityToken(transaction, chainId, campaign.property_id, tokenAddress, log.blockNumber);
-            break;
-          }
         }
+      }
+
+      for (const log of sortedCrowdfundLogs) {
+        const parsed = this.crowdfundInterface.parseLog({ topics: log.topics, data: log.data });
+        if (parsed.name !== 'TokensClaimed') {
+          continue;
+        }
+        const contractAddress = log.address.toLowerCase();
+        const campaign = campaignMap.get(contractAddress);
+        if (!campaign) {
+          continue;
+        }
+        const investor = String(parsed.args.investor).toLowerCase();
+        const amount = parsed.args.amountEquityTokens as bigint;
+        const equityTokenId = await this.lookupEquityTokenId(transaction, campaign.property_id);
+        if (!equityTokenId) {
+          continue;
+        }
+        inserts.equityClaims += await this.insertEquityClaim(
+          transaction,
+          campaign,
+          equityTokenId,
+          chainId,
+          investor,
+          amount,
+          log
+        );
       }
 
       for (const log of sortedProfitLogs) {
@@ -383,7 +402,11 @@ export class Indexer {
     const state = CROWDFUND_STATES[metadata.stateIndex] ?? 'ACTIVE';
 
     if (this.dryRun) {
-      return { id: propertyId, property_id: propertyId, contract_address: lowerAddress };
+      return {
+        id: '00000000-0000-0000-0000-000000000001',
+        property_id: propertyId,
+        contract_address: lowerAddress,
+      };
     }
 
     await this.db.query(
@@ -1047,7 +1070,8 @@ export class Indexer {
     chainId: number,
     propertyId: string,
     tokenAddress: string,
-    toBlock: number
+    log: { transactionHash: string; logIndex: number; blockNumber: number },
+    initialHolder: string
   ): Promise<void> {
     const [rows] = await this.db.query<{ id: string }>(
       'SELECT id FROM equity_tokens WHERE contract_address = :address LIMIT 1',
@@ -1057,13 +1081,7 @@ export class Indexer {
       return;
     }
 
-    const deployment = await this.findEquityTokenDeployment(tokenAddress, toBlock);
-    if (!deployment) {
-      console.warn(`[Indexer] Unable to locate deployment for equity token ${tokenAddress}`);
-      return;
-    }
-
-    await this.provider.getTransactionReceipt(deployment.txHash);
+    await this.provider.getTransactionReceipt(log.transactionHash);
     const totalSupply = await this.callEquityUint(tokenAddress, 'totalSupply');
     const admin = await this.callEquityAddress(tokenAddress, 'admin');
     const propertyIdString = await this.callEquityString(tokenAddress, 'propertyId');
@@ -1108,11 +1126,11 @@ export class Indexer {
           contractAddress: tokenAddress,
           propertyIdString,
           adminAddress: admin,
-          initialHolder: deployment.initialHolder,
+          initialHolder,
           totalSupply: totalSupply.toString(),
-          txHash: deployment.txHash,
-          logIndex: deployment.logIndex,
-          blockNumber: deployment.blockNumber,
+          txHash: log.transactionHash,
+          logIndex: log.logIndex,
+          blockNumber: log.blockNumber,
         },
         transaction,
       }
