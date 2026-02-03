@@ -1,0 +1,18 @@
+[
+  {
+    "type": "event",
+    "name": "Deposited",
+    "inputs": [
+      { "name": "amountUSDC", "type": "uint256", "indexed": false },
+      { "name": "accProfitPerShare", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Claimed",
+    "inputs": [
+      { "name": "user", "type": "address", "indexed": true },
+      { "name": "amountUSDC", "type": "uint256", "indexed": false }
+    ]
+  }
+]
