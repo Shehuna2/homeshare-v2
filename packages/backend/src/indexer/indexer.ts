@@ -27,6 +27,23 @@ export class Indexer {
   private db: Sequelize;
   private crowdfundInterface = new Interface(PropertyCrowdfundAbi);
   private profitInterface = new Interface(ProfitDistributorAbi);
+  private crowdfundReadInterface = new Interface([
+    'function propertyId() view returns (string)',
+    'function targetAmountUSDC() view returns (uint256)',
+    'function startTime() view returns (uint256)',
+    'function endTime() view returns (uint256)',
+    'function state() view returns (uint8)',
+    'function raisedAmountUSDC() view returns (uint256)',
+  ]);
+  private equityReadInterface = new Interface([
+    'function totalSupply() view returns (uint256)',
+    'function admin() view returns (address)',
+    'function propertyId() view returns (string)',
+  ]);
+  private profitReadInterface = new Interface([
+    'function usdcToken() view returns (address)',
+    'function equityToken() view returns (address)',
+  ]);
   private dryRun: boolean;
   private deploymentBlock: number;
   private batchSize: number;
@@ -116,8 +133,7 @@ export class Indexer {
     await this.db.query(
       `
       UPDATE campaigns
-      SET state = 'ACTIVE',
-          finalized_tx_hash = NULL,
+      SET finalized_tx_hash = NULL,
           finalized_log_index = NULL,
           finalized_block_number = NULL
       WHERE finalized_block_number IS NOT NULL AND finalized_block_number >= :fromBlock;
@@ -132,11 +148,8 @@ export class Indexer {
     const campaignMap = new Map(campaigns.map((c) => [c.contract_address.toLowerCase(), c]));
     const distributorMap = new Map(distributors.map((d) => [d.contract_address.toLowerCase(), d]));
 
-    const crowdfundAddresses = campaigns.map((c) => c.contract_address);
-    const distributorAddresses = distributors.map((d) => d.contract_address);
-
     const crowdfundLogs = await this.fetchLogs(
-      crowdfundAddresses,
+      undefined,
       [
         this.crowdfundInterface.getEvent('Invested').topicHash,
         this.crowdfundInterface.getEvent('Refunded').topicHash,
@@ -149,8 +162,10 @@ export class Indexer {
       toBlock
     );
 
+    const distributorAddresses = distributors.map((d) => d.contract_address);
+
     const profitLogs = await this.fetchLogs(
-      distributorAddresses,
+      distributorAddresses.length > 0 ? distributorAddresses : undefined,
       [
         this.profitInterface.getEvent('Deposited').topicHash,
         this.profitInterface.getEvent('Claimed').topicHash,
@@ -170,8 +185,34 @@ export class Indexer {
       campaignsUpdated: 0,
     };
 
+    const sortedCrowdfundLogs = [...crowdfundLogs].sort((a, b) => {
+      if (a.blockNumber !== b.blockNumber) {
+        return a.blockNumber - b.blockNumber;
+      }
+      return a.logIndex - b.logIndex;
+    });
+
+    const sortedProfitLogs = [...profitLogs].sort((a, b) => {
+      if (a.blockNumber !== b.blockNumber) {
+        return a.blockNumber - b.blockNumber;
+      }
+      return a.logIndex - b.logIndex;
+    });
+
     await this.db.transaction(async (transaction) => {
-      for (const log of crowdfundLogs) {
+      const crowdfundAddresses = Array.from(
+        new Set(sortedCrowdfundLogs.map((log) => log.address.toLowerCase()))
+      );
+      for (const address of crowdfundAddresses) {
+        if (!campaignMap.has(address)) {
+          const campaign = await this.ensureCampaign(transaction, chainId, address);
+          if (campaign) {
+            campaignMap.set(address, campaign);
+          }
+        }
+      }
+
+      for (const log of sortedCrowdfundLogs) {
         const parsed = this.crowdfundInterface.parseLog({ topics: log.topics, data: log.data });
         const contractAddress = log.address.toLowerCase();
         const campaign = campaignMap.get(contractAddress);
@@ -246,17 +287,24 @@ export class Indexer {
             break;
           }
           case 'EquityTokenSet': {
+            const tokenAddress = String(parsed.args.equityToken).toLowerCase();
+            await this.ensureEquityToken(transaction, chainId, campaign.property_id, tokenAddress, log.blockNumber);
             break;
           }
         }
       }
 
-      for (const log of profitLogs) {
+      for (const log of sortedProfitLogs) {
         const parsed = this.profitInterface.parseLog({ topics: log.topics, data: log.data });
         const contractAddress = log.address.toLowerCase();
-        const distributor = distributorMap.get(contractAddress);
+        let distributor = distributorMap.get(contractAddress);
         if (!distributor) {
-          continue;
+          const ensured = await this.ensureProfitDistributor(transaction, chainId, contractAddress);
+          if (!ensured) {
+            continue;
+          }
+          distributor = ensured;
+          distributorMap.set(contractAddress, ensured);
         }
 
         switch (parsed.name) {
@@ -302,20 +350,199 @@ export class Indexer {
   }
 
   private async fetchLogs(
-    addresses: string[],
+    addresses: string[] | undefined,
     topic0: string[],
     fromBlock: number,
     toBlock: number
   ) {
-    if (addresses.length === 0) {
-      return [];
-    }
     return this.provider.getLogs({
       address: addresses,
       fromBlock,
       toBlock,
       topics: [topic0],
     });
+  }
+
+  private async ensureCampaign(
+    transaction: Transaction,
+    chainId: number,
+    contractAddress: string
+  ): Promise<CampaignRow | null> {
+    const lowerAddress = contractAddress.toLowerCase();
+    const existing = await this.getCampaignByAddress(lowerAddress, transaction);
+    if (existing) {
+      return existing;
+    }
+
+    const metadata = await this.readCrowdfundMetadata(lowerAddress);
+    if (!metadata) {
+      return null;
+    }
+
+    const propertyId = await this.ensureProperty(transaction, chainId, lowerAddress, metadata);
+    const state = CROWDFUND_STATES[metadata.stateIndex] ?? 'ACTIVE';
+
+    if (this.dryRun) {
+      return { id: propertyId, property_id: propertyId, contract_address: lowerAddress };
+    }
+
+    await this.db.query(
+      `
+      INSERT INTO campaigns (
+        id,
+        property_id,
+        chain_id,
+        contract_address,
+        start_time,
+        end_time,
+        state,
+        target_usdc_base_units,
+        raised_usdc_base_units
+      ) VALUES (
+        gen_random_uuid(),
+        :propertyId,
+        :chainId,
+        :contractAddress,
+        to_timestamp(:startTime),
+        to_timestamp(:endTime),
+        :state,
+        :targetAmount,
+        :raisedAmount
+      )
+      ON CONFLICT (contract_address) DO NOTHING;
+    `,
+      {
+        replacements: {
+          propertyId,
+          chainId,
+          contractAddress: lowerAddress,
+          startTime: metadata.startTime,
+          endTime: metadata.endTime,
+          state,
+          targetAmount: metadata.targetAmount.toString(),
+          raisedAmount: metadata.raisedAmount.toString(),
+        },
+        transaction,
+      }
+    );
+
+    return this.getCampaignByAddress(lowerAddress, transaction);
+  }
+
+  private async ensureProperty(
+    transaction: Transaction,
+    chainId: number,
+    contractAddress: string,
+    metadata: {
+      propertyId: string;
+      targetAmount: bigint;
+    }
+  ): Promise<string> {
+    const existing = await this.getPropertyByCrowdfund(contractAddress, transaction);
+    if (existing) {
+      return existing;
+    }
+
+    if (this.dryRun) {
+      return '00000000-0000-0000-0000-000000000000';
+    }
+
+    await this.db.query(
+      `
+      INSERT INTO properties (
+        id,
+        property_id,
+        chain_id,
+        crowdfund_contract_address,
+        target_usdc_base_units
+      ) VALUES (
+        gen_random_uuid(),
+        :propertyId,
+        :chainId,
+        :contractAddress,
+        :targetAmount
+      )
+      ON CONFLICT (crowdfund_contract_address) DO NOTHING;
+    `,
+      {
+        replacements: {
+          propertyId: metadata.propertyId,
+          chainId,
+          contractAddress,
+          targetAmount: metadata.targetAmount.toString(),
+        },
+        transaction,
+      }
+    );
+
+    return (
+      (await this.getPropertyByCrowdfund(contractAddress, transaction)) ??
+      '00000000-0000-0000-0000-000000000000'
+    );
+  }
+
+  private async getPropertyByCrowdfund(
+    contractAddress: string,
+    transaction?: Transaction
+  ): Promise<string | null> {
+    const [rows] = await this.db.query<{ id: string }>(
+      'SELECT id FROM properties WHERE crowdfund_contract_address = :address LIMIT 1',
+      { replacements: { address: contractAddress }, transaction }
+    );
+    if (rows.length === 0) {
+      return null;
+    }
+    return rows[0].id;
+  }
+
+  private async getCampaignByAddress(
+    contractAddress: string,
+    transaction?: Transaction
+  ): Promise<CampaignRow | null> {
+    const [rows] = await this.db.query<CampaignRow>(
+      'SELECT id, property_id, contract_address FROM campaigns WHERE contract_address = :address LIMIT 1',
+      { replacements: { address: contractAddress }, transaction }
+    );
+    if (rows.length === 0) {
+      return null;
+    }
+    return rows[0];
+  }
+
+  private async readCrowdfundMetadata(contractAddress: string): Promise<{
+    propertyId: string;
+    targetAmount: bigint;
+    startTime: number;
+    endTime: number;
+    stateIndex: number;
+    raisedAmount: bigint;
+  } | null> {
+    try {
+      const propertyId = await this.callString(contractAddress, 'propertyId');
+      const targetAmount = await this.callUint(contractAddress, 'targetAmountUSDC');
+      const startTime = Number(await this.callUint(contractAddress, 'startTime'));
+      const endTime = Number(await this.callUint(contractAddress, 'endTime'));
+      const stateIndex = Number(await this.callUint(contractAddress, 'state'));
+      const raisedAmount = await this.callUint(contractAddress, 'raisedAmountUSDC');
+      return { propertyId, targetAmount, startTime, endTime, stateIndex, raisedAmount };
+    } catch (error) {
+      console.warn(`[Indexer] Failed to read crowdfund metadata for ${contractAddress}:`, error);
+      return null;
+    }
+  }
+
+  private async callUint(contractAddress: string, fn: string): Promise<bigint> {
+    const data = this.crowdfundReadInterface.encodeFunctionData(fn, []);
+    const result = await this.provider.call({ to: contractAddress, data });
+    const [value] = this.crowdfundReadInterface.decodeFunctionResult(fn, result);
+    return value as bigint;
+  }
+
+  private async callString(contractAddress: string, fn: string): Promise<string> {
+    const data = this.crowdfundReadInterface.encodeFunctionData(fn, []);
+    const result = await this.provider.call({ to: contractAddress, data });
+    const [value] = this.crowdfundReadInterface.decodeFunctionResult(fn, result);
+    return value as string;
   }
 
   private async getCampaigns(): Promise<CampaignRow[]> {
@@ -330,6 +557,102 @@ export class Indexer {
       'SELECT id, property_id, contract_address FROM profit_distributors'
     );
     return rows;
+  }
+
+  private async ensureProfitDistributor(
+    transaction: Transaction,
+    chainId: number,
+    contractAddress: string
+  ): Promise<ProfitDistributorRow | null> {
+    const existing = await this.getProfitDistributorByAddress(contractAddress, transaction);
+    if (existing) {
+      return existing;
+    }
+
+    try {
+      const usdcToken = await this.callProfitAddress(contractAddress, 'usdcToken');
+      const equityToken = await this.callProfitAddress(contractAddress, 'equityToken');
+      const propertyId = await this.lookupPropertyIdByEquityToken(equityToken, transaction);
+      if (!propertyId) {
+        console.warn(`[Indexer] ProfitDistributor ${contractAddress} missing property mapping; skipping`);
+        return null;
+      }
+
+      if (!this.dryRun) {
+        const deployment = await this.findContractDeployment(contractAddress);
+        await this.db.query(
+          `
+          INSERT INTO profit_distributors (
+            id,
+            property_id,
+            chain_id,
+            contract_address,
+            usdc_token_address,
+            equity_token_address,
+            created_tx_hash,
+            created_log_index,
+            created_block_number
+          ) VALUES (
+            gen_random_uuid(),
+            :propertyId,
+            :chainId,
+            :contractAddress,
+            :usdcToken,
+            :equityToken,
+            :txHash,
+            :logIndex,
+            :blockNumber
+          ) ON CONFLICT (contract_address) DO NOTHING;
+        `,
+          {
+            replacements: {
+              propertyId,
+              chainId,
+              contractAddress,
+              usdcToken,
+              equityToken,
+              txHash: deployment?.txHash ?? '0x',
+              logIndex: deployment?.logIndex ?? 0,
+              blockNumber: deployment?.blockNumber ?? 0,
+            },
+            transaction,
+          }
+        );
+      }
+
+      return this.getProfitDistributorByAddress(contractAddress, transaction);
+    } catch (error) {
+      console.warn(`[Indexer] Failed to read ProfitDistributor metadata for ${contractAddress}:`, error);
+      return null;
+    }
+  }
+
+  private async getProfitDistributorByAddress(
+    contractAddress: string,
+    transaction?: Transaction
+  ): Promise<ProfitDistributorRow | null> {
+    const [rows] = await this.db.query<ProfitDistributorRow>(
+      'SELECT id, property_id, contract_address FROM profit_distributors WHERE contract_address = :address LIMIT 1',
+      { replacements: { address: contractAddress }, transaction }
+    );
+    if (rows.length === 0) {
+      return null;
+    }
+    return rows[0];
+  }
+
+  private async lookupPropertyIdByEquityToken(
+    equityToken: string,
+    transaction?: Transaction
+  ): Promise<string | null> {
+    const [rows] = await this.db.query<{ property_id: string }>(
+      'SELECT property_id FROM equity_tokens WHERE contract_address = :address LIMIT 1',
+      { replacements: { address: equityToken }, transaction }
+    );
+    if (rows.length === 0) {
+      return null;
+    }
+    return rows[0].property_id;
   }
 
   private async getTransactionSender(txHash: string): Promise<string> {
@@ -708,10 +1031,170 @@ export class Indexer {
         SELECT COALESCE(SUM(usdc_amount_base_units), 0)
         FROM campaign_investments
         WHERE campaign_id = :campaignId
+      ) - (
+        SELECT COALESCE(SUM(usdc_amount_base_units), 0)
+        FROM campaign_refunds
+        WHERE campaign_id = :campaignId
       )
       WHERE id = :campaignId;
     `,
       { replacements: { campaignId }, transaction }
     );
+  }
+
+  private async ensureEquityToken(
+    transaction: Transaction,
+    chainId: number,
+    propertyId: string,
+    tokenAddress: string,
+    toBlock: number
+  ): Promise<void> {
+    const [rows] = await this.db.query<{ id: string }>(
+      'SELECT id FROM equity_tokens WHERE contract_address = :address LIMIT 1',
+      { replacements: { address: tokenAddress }, transaction }
+    );
+    if (rows.length > 0) {
+      return;
+    }
+
+    const deployment = await this.findEquityTokenDeployment(tokenAddress, toBlock);
+    if (!deployment) {
+      console.warn(`[Indexer] Unable to locate deployment for equity token ${tokenAddress}`);
+      return;
+    }
+
+    await this.provider.getTransactionReceipt(deployment.txHash);
+    const totalSupply = await this.callEquityUint(tokenAddress, 'totalSupply');
+    const admin = await this.callEquityAddress(tokenAddress, 'admin');
+    const propertyIdString = await this.callEquityString(tokenAddress, 'propertyId');
+
+    if (this.dryRun) {
+      console.log(`[Indexer] (dry-run) discovered equity token ${tokenAddress}`);
+      return;
+    }
+
+    await this.db.query(
+      `
+      INSERT INTO equity_tokens (
+        id,
+        property_id,
+        chain_id,
+        contract_address,
+        property_id_string,
+        admin_address,
+        initial_holder_address,
+        total_supply_base_units,
+        created_tx_hash,
+        created_log_index,
+        created_block_number
+      ) VALUES (
+        gen_random_uuid(),
+        :propertyId,
+        :chainId,
+        :contractAddress,
+        :propertyIdString,
+        :adminAddress,
+        :initialHolder,
+        :totalSupply,
+        :txHash,
+        :logIndex,
+        :blockNumber
+      ) ON CONFLICT (contract_address) DO NOTHING;
+    `,
+      {
+        replacements: {
+          propertyId,
+          chainId,
+          contractAddress: tokenAddress,
+          propertyIdString,
+          adminAddress: admin,
+          initialHolder: deployment.initialHolder,
+          totalSupply: totalSupply.toString(),
+          txHash: deployment.txHash,
+          logIndex: deployment.logIndex,
+          blockNumber: deployment.blockNumber,
+        },
+        transaction,
+      }
+    );
+  }
+
+  private async findEquityTokenDeployment(
+    tokenAddress: string,
+    toBlock: number
+  ): Promise<{ txHash: string; logIndex: number; blockNumber: number; initialHolder: string } | null> {
+    const transferTopic = new Interface([
+      'event Transfer(address indexed from, address indexed to, uint256 value)',
+    ]).getEvent('Transfer').topicHash;
+
+    const logs = await this.provider.getLogs({
+      address: tokenAddress,
+      topics: [transferTopic],
+      fromBlock: this.deploymentBlock,
+      toBlock,
+    });
+
+    for (const log of logs) {
+      const parsed = new Interface([
+        'event Transfer(address indexed from, address indexed to, uint256 value)',
+      ]).parseLog({ topics: log.topics, data: log.data });
+      const from = String(parsed.args.from).toLowerCase();
+      if (from === '0x0000000000000000000000000000000000000000') {
+        return {
+          txHash: log.transactionHash,
+          logIndex: log.logIndex,
+          blockNumber: log.blockNumber,
+          initialHolder: String(parsed.args.to).toLowerCase(),
+        };
+      }
+    }
+    return null;
+  }
+
+  private async callEquityUint(contractAddress: string, fn: string): Promise<bigint> {
+    const data = this.equityReadInterface.encodeFunctionData(fn, []);
+    const result = await this.provider.call({ to: contractAddress, data });
+    const [value] = this.equityReadInterface.decodeFunctionResult(fn, result);
+    return value as bigint;
+  }
+
+  private async callEquityString(contractAddress: string, fn: string): Promise<string> {
+    const data = this.equityReadInterface.encodeFunctionData(fn, []);
+    const result = await this.provider.call({ to: contractAddress, data });
+    const [value] = this.equityReadInterface.decodeFunctionResult(fn, result);
+    return value as string;
+  }
+
+  private async callEquityAddress(contractAddress: string, fn: string): Promise<string> {
+    const data = this.equityReadInterface.encodeFunctionData(fn, []);
+    const result = await this.provider.call({ to: contractAddress, data });
+    const [value] = this.equityReadInterface.decodeFunctionResult(fn, result);
+    return String(value).toLowerCase();
+  }
+
+  private async callProfitAddress(contractAddress: string, fn: string): Promise<string> {
+    const data = this.profitReadInterface.encodeFunctionData(fn, []);
+    const result = await this.provider.call({ to: contractAddress, data });
+    const [value] = this.profitReadInterface.decodeFunctionResult(fn, result);
+    return String(value).toLowerCase();
+  }
+
+  private async findContractDeployment(
+    contractAddress: string
+  ): Promise<{ txHash: string; logIndex: number; blockNumber: number } | null> {
+    const logs = await this.provider.getLogs({
+      address: contractAddress,
+      fromBlock: this.deploymentBlock,
+      toBlock: 'latest',
+    });
+    if (logs.length === 0) {
+      return null;
+    }
+    const log = logs[0];
+    return {
+      txHash: log.transactionHash,
+      logIndex: log.logIndex,
+      blockNumber: log.blockNumber,
+    };
   }
 }
