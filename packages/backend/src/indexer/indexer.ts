@@ -148,19 +148,23 @@ export class Indexer {
     const campaignMap = new Map(campaigns.map((c) => [c.contract_address.toLowerCase(), c]));
     const distributorMap = new Map(distributors.map((d) => [d.contract_address.toLowerCase(), d]));
 
-    const crowdfundLogs = await this.fetchLogs(
-      undefined,
-      [
-        this.crowdfundInterface.getEvent('Invested').topicHash,
-        this.crowdfundInterface.getEvent('Refunded').topicHash,
-        this.crowdfundInterface.getEvent('Finalized').topicHash,
-        this.crowdfundInterface.getEvent('Withdrawn').topicHash,
-        this.crowdfundInterface.getEvent('TokensClaimed').topicHash,
-        this.crowdfundInterface.getEvent('EquityTokenSet').topicHash,
-      ],
-      fromBlock,
-      toBlock
-    );
+    const campaignAddresses = campaigns.map((campaign) => campaign.contract_address);
+    const crowdfundLogs =
+      campaignAddresses.length > 0
+        ? await this.fetchLogs(
+            campaignAddresses,
+            [
+              this.crowdfundInterface.getEvent('Invested').topicHash,
+              this.crowdfundInterface.getEvent('Refunded').topicHash,
+              this.crowdfundInterface.getEvent('Finalized').topicHash,
+              this.crowdfundInterface.getEvent('Withdrawn').topicHash,
+              this.crowdfundInterface.getEvent('TokensClaimed').topicHash,
+              this.crowdfundInterface.getEvent('EquityTokenSet').topicHash,
+            ],
+            fromBlock,
+            toBlock
+          )
+        : [];
 
     const distributorAddresses = distributors.map((d) => d.contract_address);
 
@@ -1081,7 +1085,6 @@ export class Indexer {
       return;
     }
 
-    await this.provider.getTransactionReceipt(log.transactionHash);
     const totalSupply = await this.callEquityUint(tokenAddress, 'totalSupply');
     const admin = await this.callEquityAddress(tokenAddress, 'admin');
     const propertyIdString = await this.callEquityString(tokenAddress, 'propertyId');
@@ -1135,38 +1138,6 @@ export class Indexer {
         transaction,
       }
     );
-  }
-
-  private async findEquityTokenDeployment(
-    tokenAddress: string,
-    toBlock: number
-  ): Promise<{ txHash: string; logIndex: number; blockNumber: number; initialHolder: string } | null> {
-    const transferTopic = new Interface([
-      'event Transfer(address indexed from, address indexed to, uint256 value)',
-    ]).getEvent('Transfer').topicHash;
-
-    const logs = await this.provider.getLogs({
-      address: tokenAddress,
-      topics: [transferTopic],
-      fromBlock: this.deploymentBlock,
-      toBlock,
-    });
-
-    for (const log of logs) {
-      const parsed = new Interface([
-        'event Transfer(address indexed from, address indexed to, uint256 value)',
-      ]).parseLog({ topics: log.topics, data: log.data });
-      const from = String(parsed.args.from).toLowerCase();
-      if (from === '0x0000000000000000000000000000000000000000') {
-        return {
-          txHash: log.transactionHash,
-          logIndex: log.logIndex,
-          blockNumber: log.blockNumber,
-          initialHolder: String(parsed.args.to).toLowerCase(),
-        };
-      }
-    }
-    return null;
   }
 
   private async callEquityUint(contractAddress: string, fn: string): Promise<bigint> {
