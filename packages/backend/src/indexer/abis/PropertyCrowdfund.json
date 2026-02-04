@@ -1,0 +1,49 @@
+[
+  {
+    "type": "event",
+    "name": "Invested",
+    "inputs": [
+      { "name": "investor", "type": "address", "indexed": true },
+      { "name": "amountUSDC", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Finalized",
+    "inputs": [
+      { "name": "state", "type": "uint8", "indexed": false },
+      { "name": "raisedAmountUSDC", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Withdrawn",
+    "inputs": [
+      { "name": "to", "type": "address", "indexed": true },
+      { "name": "amountUSDC", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Refunded",
+    "inputs": [
+      { "name": "investor", "type": "address", "indexed": true },
+      { "name": "amountUSDC", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "TokensClaimed",
+    "inputs": [
+      { "name": "investor", "type": "address", "indexed": true },
+      { "name": "amountEquityTokens", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "EquityTokenSet",
+    "inputs": [
+      { "name": "equityToken", "type": "address", "indexed": true }
+    ]
+  }
+]
