@@ -140,6 +140,17 @@ export class Indexer {
     `,
       { replacements: { fromBlock } }
     );
+
+    await this.db.query(`
+      UPDATE campaigns
+      SET raised_usdc_base_units = COALESCE(
+        (SELECT SUM(usdc_amount_base_units) FROM campaign_investments WHERE campaign_id = campaigns.id),
+        0
+      ) - COALESCE(
+        (SELECT SUM(usdc_amount_base_units) FROM campaign_refunds WHERE campaign_id = campaigns.id),
+        0
+      );
+    `);
   }
 
   async processBatch(chainId: number, fromBlock: number, toBlock: number): Promise<void> {
@@ -207,18 +218,6 @@ export class Indexer {
     });
 
     await this.db.transaction(async (transaction) => {
-      const crowdfundAddresses = Array.from(
-        new Set(sortedCrowdfundLogs.map((log) => log.address.toLowerCase()))
-      );
-      for (const address of crowdfundAddresses) {
-        if (!campaignMap.has(address)) {
-          const campaign = await this.ensureCampaign(transaction, chainId, address);
-          if (campaign) {
-            campaignMap.set(address, campaign);
-          }
-        }
-      }
-
       for (const log of sortedCrowdfundLogs) {
         const parsed = this.crowdfundInterface.parseLog({ topics: log.topics, data: log.data });
         const contractAddress = log.address.toLowerCase();
