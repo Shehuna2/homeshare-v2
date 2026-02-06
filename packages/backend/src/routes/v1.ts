@@ -25,6 +25,10 @@ import {
 
 const router = Router();
 
+router.get('/health', (_req, res) => {
+  res.json({ ok: true });
+});
+
 router.get('/properties', listProperties);
 router.get('/properties/:propertyId', getProperty);
 router.get('/properties/:propertyId/equity-claims', listEquityClaims);
