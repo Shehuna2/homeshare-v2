@@ -120,7 +120,7 @@ export const listEquityClaims = async (req: Request, res: Response) => {
         ec.equity_amount_base_units::text AS "equityAmountBaseUnits",
         ec.tx_hash AS "txHash",
         ec.log_index AS "logIndex",
-        ec.block_number::text AS "blockNumber",
+        ec.block_number AS "blockNumber",
         ec.created_at AS "createdAt"
       FROM equity_claims ec
       JOIN properties p ON p.id = ec.property_id
@@ -180,7 +180,7 @@ export const listProfitDeposits = async (req: Request, res: Response) => {
         pd.acc_profit_per_share::text AS "accProfitPerShare",
         pd.tx_hash AS "txHash",
         pd.log_index AS "logIndex",
-        pd.block_number::text AS "blockNumber",
+        pd.block_number AS "blockNumber",
         pd.created_at AS "createdAt"
       FROM profit_deposits pd
       JOIN properties p ON p.id = pd.property_id
@@ -238,7 +238,7 @@ export const listProfitClaims = async (req: Request, res: Response) => {
         pc.usdc_amount_base_units::text AS "usdcAmountBaseUnits",
         pc.tx_hash AS "txHash",
         pc.log_index AS "logIndex",
-        pc.block_number::text AS "blockNumber",
+        pc.block_number AS "blockNumber",
         pc.created_at AS "createdAt"
       FROM profit_claims pc
       JOIN properties p ON p.id = pc.property_id
