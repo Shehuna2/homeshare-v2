@@ -8,7 +8,8 @@
     "start": "node dist/server.js",
     "migrate": "tsx src/db/migrate.ts",
     "lint": "eslint . --ext .ts",
-    "test": "echo \"No tests yet\""
+    "test": "echo \"No tests yet\"",
+    "check:v1": "tsx scripts/check-v1.ts"
   },
   "dependencies": {
     "express": "^4.18.2",

@@ -1,0 +1,239 @@
+import { Request, Response } from 'express';
+import { QueryTypes } from 'sequelize';
+import { sequelize } from '../../db/index.js';
+import {
+  BASE_SEPOLIA_CHAIN_ID,
+  ValidationError,
+  normalizeAddress,
+  parseCampaignCursor,
+  parseEventCursor,
+  parseLimit,
+} from '../../validators/v1.js';
+
+const handleError = (res: Response, error: unknown) => {
+  if (error instanceof ValidationError) {
+    return res.status(error.status).json({ error: error.message });
+  }
+  console.error(error);
+  return res.status(500).json({ error: 'Internal server error' });
+};
+
+export const listCampaigns = async (req: Request, res: Response) => {
+  try {
+    const limit = parseLimit(req.query.limit);
+    const cursor = parseCampaignCursor(req.query);
+    const limitPlus = limit + 1;
+
+    const rows = await sequelize.query(
+      `
+      SELECT
+        p.property_id AS "propertyId",
+        LOWER(c.contract_address) AS "campaignAddress",
+        c.start_time AS "startTime",
+        c.end_time AS "endTime",
+        c.state AS "state",
+        c.target_usdc_base_units::text AS "targetUsdcBaseUnits",
+        c.raised_usdc_base_units::text AS "raisedUsdcBaseUnits",
+        c.finalized_tx_hash AS "finalizedTxHash",
+        c.finalized_log_index AS "finalizedLogIndex",
+        c.finalized_block_number::text AS "finalizedBlockNumber",
+        c.created_at AS "createdAt",
+        c.updated_at AS "updatedAt"
+      FROM campaigns c
+      JOIN properties p ON p.id = c.property_id
+      WHERE c.chain_id = :chainId
+        ${
+          cursor
+            ? 'AND (c.start_time, c.contract_address) > (:cursorStartTime, :cursorContractAddress)'
+            : ''
+        }
+      ORDER BY c.start_time ASC, c.contract_address ASC
+      LIMIT :limitPlus
+      `,
+      {
+        type: QueryTypes.SELECT,
+        replacements: {
+          chainId: BASE_SEPOLIA_CHAIN_ID,
+          cursorStartTime: cursor?.cursorStartTime,
+          cursorContractAddress: cursor?.cursorContractAddress,
+          limitPlus,
+        },
+      }
+    );
+
+    const items = rows.slice(0, limit);
+    const nextCursor =
+      rows.length > limit
+        ? {
+            cursorStartTime: items[items.length - 1]?.startTime,
+            cursorContractAddress: items[items.length - 1]?.campaignAddress,
+          }
+        : null;
+
+    return res.json({ campaigns: items, nextCursor });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
+export const getCampaign = async (req: Request, res: Response) => {
+  try {
+    const campaignAddress = normalizeAddress(req.params.campaignAddress, 'campaignAddress');
+
+    const rows = await sequelize.query(
+      `
+      SELECT
+        p.property_id AS "propertyId",
+        LOWER(c.contract_address) AS "campaignAddress",
+        c.start_time AS "startTime",
+        c.end_time AS "endTime",
+        c.state AS "state",
+        c.target_usdc_base_units::text AS "targetUsdcBaseUnits",
+        c.raised_usdc_base_units::text AS "raisedUsdcBaseUnits",
+        c.finalized_tx_hash AS "finalizedTxHash",
+        c.finalized_log_index AS "finalizedLogIndex",
+        c.finalized_block_number::text AS "finalizedBlockNumber",
+        c.created_at AS "createdAt",
+        c.updated_at AS "updatedAt"
+      FROM campaigns c
+      JOIN properties p ON p.id = c.property_id
+      WHERE c.chain_id = :chainId AND c.contract_address = :campaignAddress
+      LIMIT 1
+      `,
+      {
+        type: QueryTypes.SELECT,
+        replacements: {
+          chainId: BASE_SEPOLIA_CHAIN_ID,
+          campaignAddress,
+        },
+      }
+    );
+
+    const campaign = rows[0];
+    if (!campaign) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+
+    return res.json({ campaign });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
+export const listCampaignInvestments = async (req: Request, res: Response) => {
+  try {
+    const campaignAddress = normalizeAddress(req.params.campaignAddress, 'campaignAddress');
+    const limit = parseLimit(req.query.limit);
+    const cursor = parseEventCursor(req.query);
+    const limitPlus = limit + 1;
+
+    const rows = await sequelize.query(
+      `
+      SELECT
+        p.property_id AS "propertyId",
+        LOWER(c.contract_address) AS "campaignAddress",
+        LOWER(ci.investor_address) AS "investorAddress",
+        ci.usdc_amount_base_units::text AS "usdcAmountBaseUnits",
+        ci.tx_hash AS "txHash",
+        ci.log_index AS "logIndex",
+        ci.block_number::text AS "blockNumber",
+        ci.created_at AS "createdAt"
+      FROM campaign_investments ci
+      JOIN campaigns c ON c.id = ci.campaign_id
+      JOIN properties p ON p.id = ci.property_id
+      WHERE ci.chain_id = :chainId
+        AND c.chain_id = :chainId
+        AND c.contract_address = :campaignAddress
+        ${
+          cursor
+            ? 'AND (ci.block_number, ci.log_index) > (:cursorBlockNumber, :cursorLogIndex)'
+            : ''
+        }
+      ORDER BY ci.block_number ASC, ci.log_index ASC
+      LIMIT :limitPlus
+      `,
+      {
+        type: QueryTypes.SELECT,
+        replacements: {
+          chainId: BASE_SEPOLIA_CHAIN_ID,
+          campaignAddress,
+          cursorBlockNumber: cursor?.cursorBlockNumber,
+          cursorLogIndex: cursor?.cursorLogIndex,
+          limitPlus,
+        },
+      }
+    );
+
+    const items = rows.slice(0, limit);
+    const nextCursor =
+      rows.length > limit
+        ? {
+            cursorBlockNumber: items[items.length - 1]?.blockNumber,
+            cursorLogIndex: items[items.length - 1]?.logIndex,
+          }
+        : null;
+
+    return res.json({ investments: items, nextCursor });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
+export const listCampaignRefunds = async (req: Request, res: Response) => {
+  try {
+    const campaignAddress = normalizeAddress(req.params.campaignAddress, 'campaignAddress');
+    const limit = parseLimit(req.query.limit);
+    const cursor = parseEventCursor(req.query);
+    const limitPlus = limit + 1;
+
+    const rows = await sequelize.query(
+      `
+      SELECT
+        p.property_id AS "propertyId",
+        LOWER(c.contract_address) AS "campaignAddress",
+        LOWER(cr.investor_address) AS "investorAddress",
+        cr.usdc_amount_base_units::text AS "usdcAmountBaseUnits",
+        cr.tx_hash AS "txHash",
+        cr.log_index AS "logIndex",
+        cr.block_number::text AS "blockNumber",
+        cr.created_at AS "createdAt"
+      FROM campaign_refunds cr
+      JOIN campaigns c ON c.id = cr.campaign_id
+      JOIN properties p ON p.id = cr.property_id
+      WHERE cr.chain_id = :chainId
+        AND c.chain_id = :chainId
+        AND c.contract_address = :campaignAddress
+        ${
+          cursor
+            ? 'AND (cr.block_number, cr.log_index) > (:cursorBlockNumber, :cursorLogIndex)'
+            : ''
+        }
+      ORDER BY cr.block_number ASC, cr.log_index ASC
+      LIMIT :limitPlus
+      `,
+      {
+        type: QueryTypes.SELECT,
+        replacements: {
+          chainId: BASE_SEPOLIA_CHAIN_ID,
+          campaignAddress,
+          cursorBlockNumber: cursor?.cursorBlockNumber,
+          cursorLogIndex: cursor?.cursorLogIndex,
+          limitPlus,
+        },
+      }
+    );
+
+    const items = rows.slice(0, limit);
+    const nextCursor =
+      rows.length > limit
+        ? {
+            cursorBlockNumber: items[items.length - 1]?.blockNumber,
+            cursorLogIndex: items[items.length - 1]?.logIndex,
+          }
+        : null;
+
+    return res.json({ refunds: items, nextCursor });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};

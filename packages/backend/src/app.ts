@@ -5,6 +5,7 @@ import investmentsRouter from './routes/investments.js';
 import authRouter from './routes/auth.js';
 import chainsRouter from './routes/chains.js';
 import tokensRouter from './routes/tokens.js';
+import v1Router from './routes/v1.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { requestLogger } from './middleware/requestLogger.js';
 
@@ -26,6 +27,7 @@ app.use('/api/investments', investmentsRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/chains', chainsRouter);
 app.use('/api/tokens', tokensRouter);
+app.use('/v1', v1Router);
 
 // Error handling
 app.use(errorHandler);
