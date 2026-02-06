@@ -93,7 +93,7 @@ export const createPropertyIntent = async (req: AuthenticatedRequest, res: Respo
           location,
           description,
           targetUsdcBaseUnits,
-          crowdfundContractAddress: crowdfundAddress,
+          crowdfundContractAddress,
           createdByAddress: adminAddress,
         },
       }
@@ -109,7 +109,6 @@ export const createPropertyIntent = async (req: AuthenticatedRequest, res: Respo
 export const createProfitDistributionIntent = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const adminAddress = requireAdminAddress(req);
-    const chainId = validateChainId(req.body.chainId);
     const propertyId = validatePropertyId(req.body.propertyId);
     const profitDistributorAddress = normalizeAddress(
       req.body.profitDistributorAddress?.toString(),
