@@ -40,6 +40,14 @@ export const parseLimit = (value: unknown, defaultLimit = 50, maxLimit = 200): n
   return parsed;
 };
 
+const parseCursorDigits = (value: unknown, field: string): string => {
+  const asString = value?.toString();
+  if (!asString || !/^[0-9]+$/.test(asString)) {
+    throw new ValidationError(`Invalid ${field}`);
+  }
+  return asString;
+};
+
 export const parseEventCursor = (query: Record<string, unknown>) => {
   const blockNumber = query.cursorBlockNumber ?? query.blockNumber;
   const logIndex = query.cursorLogIndex ?? query.logIndex;
@@ -49,21 +57,15 @@ export const parseEventCursor = (query: Record<string, unknown>) => {
   }
 
   if (blockNumber === undefined || logIndex === undefined) {
-    throw new ValidationError('Both cursorBlockNumber and cursorLogIndex are required');
+    throw new ValidationError(
+      'Provide both cursorBlockNumber and cursorLogIndex (or blockNumber and logIndex)'
+    );
   }
 
-  const parsedBlock = Number(blockNumber);
-  const parsedLog = Number(logIndex);
+  const parsedBlock = parseCursorDigits(blockNumber, 'cursorBlockNumber');
+  const parsedLog = parseCursorDigits(logIndex, 'cursorLogIndex');
 
-  if (!Number.isInteger(parsedBlock) || parsedBlock < 0) {
-    throw new ValidationError('Invalid cursorBlockNumber');
-  }
-
-  if (!Number.isInteger(parsedLog) || parsedLog < 0) {
-    throw new ValidationError('Invalid cursorLogIndex');
-  }
-
-  return { blockNumber: parsedBlock, logIndex: parsedLog };
+  return { cursorBlockNumber: parsedBlock, cursorLogIndex: parsedLog };
 };
 
 export const parseCampaignCursor = (query: Record<string, unknown>) => {
@@ -85,7 +87,7 @@ export const parseCampaignCursor = (query: Record<string, unknown>) => {
 
   const normalizedAddress = normalizeAddress(contractAddress.toString(), 'cursorContractAddress');
 
-  return { startTime: parsedStart.toISOString(), contractAddress: normalizedAddress };
+  return { cursorStartTime: parsedStart.toISOString(), cursorContractAddress: normalizedAddress };
 };
 
 export const parsePropertyCursor = (query: Record<string, unknown>) => {
@@ -106,4 +108,18 @@ export const parseBaseUnits = (value: unknown, field: string): string => {
     throw new ValidationError(`Invalid ${field}`);
   }
   return asString;
+};
+
+export const validateChainId = (value: unknown): number => {
+  if (value === undefined || value === null || value === '') {
+    return BASE_SEPOLIA_CHAIN_ID;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) {
+    throw new ValidationError('Invalid chainId');
+  }
+  if (parsed !== BASE_SEPOLIA_CHAIN_ID) {
+    throw new ValidationError('Unsupported chainId');
+  }
+  return parsed;
 };

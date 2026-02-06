@@ -42,7 +42,11 @@ export const listCampaigns = async (req: Request, res: Response) => {
       FROM campaigns c
       JOIN properties p ON p.id = c.property_id
       WHERE c.chain_id = :chainId
-        ${cursor ? 'AND (c.start_time, c.contract_address) > (:cursorStartTime, :cursorContractAddress)' : ''}
+        ${
+          cursor
+            ? 'AND (c.start_time, c.contract_address) > (:cursorStartTime, :cursorContractAddress)'
+            : ''
+        }
       ORDER BY c.start_time ASC, c.contract_address ASC
       LIMIT :limitPlus
       `,
@@ -50,8 +54,8 @@ export const listCampaigns = async (req: Request, res: Response) => {
         type: QueryTypes.SELECT,
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
-          cursorStartTime: cursor?.startTime,
-          cursorContractAddress: cursor?.contractAddress,
+          cursorStartTime: cursor?.cursorStartTime,
+          cursorContractAddress: cursor?.cursorContractAddress,
           limitPlus,
         },
       }
@@ -61,8 +65,8 @@ export const listCampaigns = async (req: Request, res: Response) => {
     const nextCursor =
       rows.length > limit
         ? {
-            startTime: items[items.length - 1]?.startTime,
-            contractAddress: items[items.length - 1]?.campaignAddress,
+            cursorStartTime: items[items.length - 1]?.startTime,
+            cursorContractAddress: items[items.length - 1]?.campaignAddress,
           }
         : null;
 
@@ -140,7 +144,11 @@ export const listCampaignInvestments = async (req: Request, res: Response) => {
       WHERE ci.chain_id = :chainId
         AND c.chain_id = :chainId
         AND c.contract_address = :campaignAddress
-        ${cursor ? 'AND (ci.block_number, ci.log_index) > (:cursorBlockNumber, :cursorLogIndex)' : ''}
+        ${
+          cursor
+            ? 'AND (ci.block_number, ci.log_index) > (:cursorBlockNumber, :cursorLogIndex)'
+            : ''
+        }
       ORDER BY ci.block_number ASC, ci.log_index ASC
       LIMIT :limitPlus
       `,
@@ -149,8 +157,8 @@ export const listCampaignInvestments = async (req: Request, res: Response) => {
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           campaignAddress,
-          cursorBlockNumber: cursor?.blockNumber,
-          cursorLogIndex: cursor?.logIndex,
+          cursorBlockNumber: cursor?.cursorBlockNumber,
+          cursorLogIndex: cursor?.cursorLogIndex,
           limitPlus,
         },
       }
@@ -160,8 +168,8 @@ export const listCampaignInvestments = async (req: Request, res: Response) => {
     const nextCursor =
       rows.length > limit
         ? {
-            blockNumber: items[items.length - 1]?.blockNumber,
-            logIndex: items[items.length - 1]?.logIndex,
+            cursorBlockNumber: items[items.length - 1]?.blockNumber,
+            cursorLogIndex: items[items.length - 1]?.logIndex,
           }
         : null;
 
@@ -195,7 +203,11 @@ export const listCampaignRefunds = async (req: Request, res: Response) => {
       WHERE cr.chain_id = :chainId
         AND c.chain_id = :chainId
         AND c.contract_address = :campaignAddress
-        ${cursor ? 'AND (cr.block_number, cr.log_index) > (:cursorBlockNumber, :cursorLogIndex)' : ''}
+        ${
+          cursor
+            ? 'AND (cr.block_number, cr.log_index) > (:cursorBlockNumber, :cursorLogIndex)'
+            : ''
+        }
       ORDER BY cr.block_number ASC, cr.log_index ASC
       LIMIT :limitPlus
       `,
@@ -204,8 +216,8 @@ export const listCampaignRefunds = async (req: Request, res: Response) => {
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           campaignAddress,
-          cursorBlockNumber: cursor?.blockNumber,
-          cursorLogIndex: cursor?.logIndex,
+          cursorBlockNumber: cursor?.cursorBlockNumber,
+          cursorLogIndex: cursor?.cursorLogIndex,
           limitPlus,
         },
       }
@@ -215,8 +227,8 @@ export const listCampaignRefunds = async (req: Request, res: Response) => {
     const nextCursor =
       rows.length > limit
         ? {
-            blockNumber: items[items.length - 1]?.blockNumber,
-            logIndex: items[items.length - 1]?.logIndex,
+            cursorBlockNumber: items[items.length - 1]?.blockNumber,
+            cursorLogIndex: items[items.length - 1]?.logIndex,
           }
         : null;
 

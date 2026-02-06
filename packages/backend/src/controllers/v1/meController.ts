@@ -49,7 +49,11 @@ export const listMyInvestments = async (req: AuthenticatedRequest, res: Response
       WHERE ci.chain_id = :chainId
         AND c.chain_id = :chainId
         AND ci.investor_address = :investorAddress
-        ${cursor ? 'AND (ci.block_number, ci.log_index) > (:cursorBlockNumber, :cursorLogIndex)' : ''}
+        ${
+          cursor
+            ? 'AND (ci.block_number, ci.log_index) > (:cursorBlockNumber, :cursorLogIndex)'
+            : ''
+        }
       ORDER BY ci.block_number ASC, ci.log_index ASC
       LIMIT :limitPlus
       `,
@@ -58,8 +62,8 @@ export const listMyInvestments = async (req: AuthenticatedRequest, res: Response
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           investorAddress,
-          cursorBlockNumber: cursor?.blockNumber,
-          cursorLogIndex: cursor?.logIndex,
+          cursorBlockNumber: cursor?.cursorBlockNumber,
+          cursorLogIndex: cursor?.cursorLogIndex,
           limitPlus,
         },
       }
@@ -69,8 +73,8 @@ export const listMyInvestments = async (req: AuthenticatedRequest, res: Response
     const nextCursor =
       rows.length > limit
         ? {
-            blockNumber: items[items.length - 1]?.blockNumber,
-            logIndex: items[items.length - 1]?.logIndex,
+            cursorBlockNumber: items[items.length - 1]?.blockNumber,
+            cursorLogIndex: items[items.length - 1]?.logIndex,
           }
         : null;
 
@@ -105,7 +109,11 @@ export const listMyEquityClaims = async (req: AuthenticatedRequest, res: Respons
       LEFT JOIN campaigns c ON c.id = ec.campaign_id
       WHERE ec.chain_id = :chainId
         AND ec.claimant_address = :claimantAddress
-        ${cursor ? 'AND (ec.block_number, ec.log_index) > (:cursorBlockNumber, :cursorLogIndex)' : ''}
+        ${
+          cursor
+            ? 'AND (ec.block_number, ec.log_index) > (:cursorBlockNumber, :cursorLogIndex)'
+            : ''
+        }
       ORDER BY ec.block_number ASC, ec.log_index ASC
       LIMIT :limitPlus
       `,
@@ -114,8 +122,8 @@ export const listMyEquityClaims = async (req: AuthenticatedRequest, res: Respons
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           claimantAddress,
-          cursorBlockNumber: cursor?.blockNumber,
-          cursorLogIndex: cursor?.logIndex,
+          cursorBlockNumber: cursor?.cursorBlockNumber,
+          cursorLogIndex: cursor?.cursorLogIndex,
           limitPlus,
         },
       }
@@ -125,8 +133,8 @@ export const listMyEquityClaims = async (req: AuthenticatedRequest, res: Respons
     const nextCursor =
       rows.length > limit
         ? {
-            blockNumber: items[items.length - 1]?.blockNumber,
-            logIndex: items[items.length - 1]?.logIndex,
+            cursorBlockNumber: items[items.length - 1]?.blockNumber,
+            cursorLogIndex: items[items.length - 1]?.logIndex,
           }
         : null;
 
@@ -159,7 +167,11 @@ export const listMyProfitClaims = async (req: AuthenticatedRequest, res: Respons
       JOIN properties p ON p.id = pc.property_id
       WHERE pc.chain_id = :chainId
         AND pc.claimer_address = :claimerAddress
-        ${cursor ? 'AND (pc.block_number, pc.log_index) > (:cursorBlockNumber, :cursorLogIndex)' : ''}
+        ${
+          cursor
+            ? 'AND (pc.block_number, pc.log_index) > (:cursorBlockNumber, :cursorLogIndex)'
+            : ''
+        }
       ORDER BY pc.block_number ASC, pc.log_index ASC
       LIMIT :limitPlus
       `,
@@ -168,8 +180,8 @@ export const listMyProfitClaims = async (req: AuthenticatedRequest, res: Respons
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           claimerAddress,
-          cursorBlockNumber: cursor?.blockNumber,
-          cursorLogIndex: cursor?.logIndex,
+          cursorBlockNumber: cursor?.cursorBlockNumber,
+          cursorLogIndex: cursor?.cursorLogIndex,
           limitPlus,
         },
       }
@@ -179,8 +191,8 @@ export const listMyProfitClaims = async (req: AuthenticatedRequest, res: Respons
     const nextCursor =
       rows.length > limit
         ? {
-            blockNumber: items[items.length - 1]?.blockNumber,
-            logIndex: items[items.length - 1]?.logIndex,
+            cursorBlockNumber: items[items.length - 1]?.blockNumber,
+            cursorLogIndex: items[items.length - 1]?.logIndex,
           }
         : null;
 

@@ -31,7 +31,7 @@ export const listProperties = async (req: Request, res: Response) => {
         name,
         location,
         description,
-        LOWER(crowdfund_contract_address) AS "crowdfundContractAddress",
+        LOWER(crowdfund_contract_address) AS "crowdfundAddress",
         LOWER(equity_token_address) AS "equityTokenAddress",
         LOWER(profit_distributor_address) AS "profitDistributorAddress",
         target_usdc_base_units::text AS "targetUsdcBaseUnits",
@@ -73,7 +73,7 @@ export const getProperty = async (req: Request, res: Response) => {
         name,
         location,
         description,
-        LOWER(crowdfund_contract_address) AS "crowdfundContractAddress",
+        LOWER(crowdfund_contract_address) AS "crowdfundAddress",
         LOWER(equity_token_address) AS "equityTokenAddress",
         LOWER(profit_distributor_address) AS "profitDistributorAddress",
         target_usdc_base_units::text AS "targetUsdcBaseUnits",
@@ -128,7 +128,11 @@ export const listEquityClaims = async (req: Request, res: Response) => {
       LEFT JOIN campaigns c ON c.id = ec.campaign_id
       WHERE ec.chain_id = :chainId
         AND p.property_id = :propertyId
-        ${cursor ? 'AND (ec.block_number, ec.log_index) > (:cursorBlockNumber, :cursorLogIndex)' : ''}
+        ${
+          cursor
+            ? 'AND (ec.block_number, ec.log_index) > (:cursorBlockNumber, :cursorLogIndex)'
+            : ''
+        }
       ORDER BY ec.block_number ASC, ec.log_index ASC
       LIMIT :limitPlus
       `,
@@ -137,8 +141,8 @@ export const listEquityClaims = async (req: Request, res: Response) => {
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           propertyId,
-          cursorBlockNumber: cursor?.blockNumber,
-          cursorLogIndex: cursor?.logIndex,
+          cursorBlockNumber: cursor?.cursorBlockNumber,
+          cursorLogIndex: cursor?.cursorLogIndex,
           limitPlus,
         },
       }
@@ -148,8 +152,8 @@ export const listEquityClaims = async (req: Request, res: Response) => {
     const nextCursor =
       rows.length > limit
         ? {
-            blockNumber: items[items.length - 1]?.blockNumber,
-            logIndex: items[items.length - 1]?.logIndex,
+            cursorBlockNumber: items[items.length - 1]?.blockNumber,
+            cursorLogIndex: items[items.length - 1]?.logIndex,
           }
         : null;
 
@@ -183,7 +187,11 @@ export const listProfitDeposits = async (req: Request, res: Response) => {
       JOIN profit_distributors pdistr ON pdistr.id = pd.profit_distributor_id
       WHERE pd.chain_id = :chainId
         AND p.property_id = :propertyId
-        ${cursor ? 'AND (pd.block_number, pd.log_index) > (:cursorBlockNumber, :cursorLogIndex)' : ''}
+        ${
+          cursor
+            ? 'AND (pd.block_number, pd.log_index) > (:cursorBlockNumber, :cursorLogIndex)'
+            : ''
+        }
       ORDER BY pd.block_number ASC, pd.log_index ASC
       LIMIT :limitPlus
       `,
@@ -192,8 +200,8 @@ export const listProfitDeposits = async (req: Request, res: Response) => {
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           propertyId,
-          cursorBlockNumber: cursor?.blockNumber,
-          cursorLogIndex: cursor?.logIndex,
+          cursorBlockNumber: cursor?.cursorBlockNumber,
+          cursorLogIndex: cursor?.cursorLogIndex,
           limitPlus,
         },
       }
@@ -203,8 +211,8 @@ export const listProfitDeposits = async (req: Request, res: Response) => {
     const nextCursor =
       rows.length > limit
         ? {
-            blockNumber: items[items.length - 1]?.blockNumber,
-            logIndex: items[items.length - 1]?.logIndex,
+            cursorBlockNumber: items[items.length - 1]?.blockNumber,
+            cursorLogIndex: items[items.length - 1]?.logIndex,
           }
         : null;
 
@@ -237,7 +245,11 @@ export const listProfitClaims = async (req: Request, res: Response) => {
       JOIN profit_distributors pdistr ON pdistr.id = pc.profit_distributor_id
       WHERE pc.chain_id = :chainId
         AND p.property_id = :propertyId
-        ${cursor ? 'AND (pc.block_number, pc.log_index) > (:cursorBlockNumber, :cursorLogIndex)' : ''}
+        ${
+          cursor
+            ? 'AND (pc.block_number, pc.log_index) > (:cursorBlockNumber, :cursorLogIndex)'
+            : ''
+        }
       ORDER BY pc.block_number ASC, pc.log_index ASC
       LIMIT :limitPlus
       `,
@@ -246,8 +258,8 @@ export const listProfitClaims = async (req: Request, res: Response) => {
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           propertyId,
-          cursorBlockNumber: cursor?.blockNumber,
-          cursorLogIndex: cursor?.logIndex,
+          cursorBlockNumber: cursor?.cursorBlockNumber,
+          cursorLogIndex: cursor?.cursorLogIndex,
           limitPlus,
         },
       }
@@ -257,8 +269,8 @@ export const listProfitClaims = async (req: Request, res: Response) => {
     const nextCursor =
       rows.length > limit
         ? {
-            blockNumber: items[items.length - 1]?.blockNumber,
-            logIndex: items[items.length - 1]?.logIndex,
+            cursorBlockNumber: items[items.length - 1]?.blockNumber,
+            cursorLogIndex: items[items.length - 1]?.logIndex,
           }
         : null;
 

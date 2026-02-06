@@ -3,10 +3,10 @@ import { randomUUID } from 'crypto';
 import { sequelize } from '../../db/index.js';
 import { AuthenticatedRequest } from '../../middleware/auth.js';
 import {
-  BASE_SEPOLIA_CHAIN_ID,
   ValidationError,
   normalizeAddress,
   parseBaseUnits,
+  validateChainId,
   validatePropertyId,
 } from '../../validators/v1.js';
 
@@ -28,13 +28,15 @@ const requireAdminAddress = (req: AuthenticatedRequest): string => {
 export const createPropertyIntent = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const adminAddress = requireAdminAddress(req);
+    const chainId = validateChainId(req.body.chainId);
     const propertyId = validatePropertyId(req.body.propertyId);
     const name = req.body.name?.toString().trim();
     const location = req.body.location?.toString().trim();
     const description = req.body.description?.toString().trim();
     const targetUsdcBaseUnits = parseBaseUnits(req.body.targetUsdcBaseUnits, 'targetUsdcBaseUnits');
-    const crowdfundContractAddress = req.body.crowdfundContractAddress
-      ? normalizeAddress(req.body.crowdfundContractAddress.toString(), 'crowdfundContractAddress')
+    const crowdfundContractAddress = req.body.crowdfundAddress ?? req.body.crowdfundContractAddress;
+    const crowdfundAddress = crowdfundContractAddress
+      ? normalizeAddress(crowdfundContractAddress.toString(), 'crowdfundAddress')
       : null;
 
     if (!name) {
@@ -79,13 +81,13 @@ export const createPropertyIntent = async (req: AuthenticatedRequest, res: Respo
         location,
         description,
         target_usdc_base_units::text AS "targetUsdcBaseUnits",
-        LOWER(crowdfund_contract_address) AS "crowdfundContractAddress",
+        LOWER(crowdfund_contract_address) AS "crowdfundAddress",
         created_at AS "createdAt"
       `,
       {
         replacements: {
           id: randomUUID(),
-          chainId: BASE_SEPOLIA_CHAIN_ID,
+          chainId,
           propertyId,
           name,
           location,
@@ -141,7 +143,7 @@ export const createProfitDistributionIntent = async (req: AuthenticatedRequest, 
       {
         replacements: {
           id: randomUUID(),
-          chainId: BASE_SEPOLIA_CHAIN_ID,
+          chainId,
           propertyId,
           profitDistributorAddress,
           usdcAmountBaseUnits,
