@@ -25,23 +25,37 @@ export const listProperties = async (req: Request, res: Response) => {
     const limitPlus = limit + 1;
 
     const rows = await sequelize.query(
-      `
-      SELECT
-        property_id AS "propertyId",
-        name,
-        location,
-        description,
-        LOWER(crowdfund_contract_address) AS "crowdfundAddress",
-        LOWER(equity_token_address) AS "equityTokenAddress",
-        LOWER(profit_distributor_address) AS "profitDistributorAddress",
-        target_usdc_base_units::text AS "targetUsdcBaseUnits",
-        created_at AS "createdAt",
-        updated_at AS "updatedAt"
-      FROM properties
-      WHERE chain_id = :chainId
-        ${cursorPropertyId ? 'AND property_id > :cursorPropertyId' : ''}
-      ORDER BY property_id ASC
-      LIMIT :limitPlus
+        `
+        SELECT
+          p.property_id AS "propertyId",
+          p.name,
+          p.location,
+          p.description,
+          LOWER(p.crowdfund_contract_address) AS "crowdfundContractAddress",
+          LOWER(et.contract_address) AS "equityTokenAddress",
+          LOWER(pd.contract_address) AS "profitDistributorAddress",
+          p.target_usdc_base_units::text AS "targetUsdcBaseUnits",
+          p.created_at AS "createdAt",
+          p.updated_at AS "updatedAt"
+        FROM properties p
+        LEFT JOIN LATERAL (
+          SELECT contract_address
+          FROM equity_tokens
+          WHERE property_id = p.id
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) et ON true
+        LEFT JOIN LATERAL (
+          SELECT contract_address
+          FROM profit_distributors
+          WHERE property_id = p.id
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) pd ON true
+        WHERE p.chain_id = :chainId
+          ${cursorPropertyId ? 'AND p.property_id > :cursorPropertyId' : ''}
+        ORDER BY p.property_id ASC
+        LIMIT :limitPlus
       `,
       {
         type: QueryTypes.SELECT,
@@ -67,23 +81,37 @@ export const getProperty = async (req: Request, res: Response) => {
     const propertyId = validatePropertyId(req.params.propertyId);
 
     const rows = await sequelize.query(
-      `
-      SELECT
-        property_id AS "propertyId",
-        name,
-        location,
-        description,
-        LOWER(crowdfund_contract_address) AS "crowdfundAddress",
-        LOWER(equity_token_address) AS "equityTokenAddress",
-        LOWER(profit_distributor_address) AS "profitDistributorAddress",
-        target_usdc_base_units::text AS "targetUsdcBaseUnits",
-        created_at AS "createdAt",
-        updated_at AS "updatedAt"
-      FROM properties
-      WHERE chain_id = :chainId AND property_id = :propertyId
-      LIMIT 1
-      `,
-      {
+        `
+        SELECT
+          p.property_id AS "propertyId",
+          p.name,
+          p.location,
+          p.description,
+          LOWER(p.crowdfund_contract_address) AS "crowdfundContractAddress",
+          LOWER(et.contract_address) AS "equityTokenAddress",
+          LOWER(pd.contract_address) AS "profitDistributorAddress",
+          p.target_usdc_base_units::text AS "targetUsdcBaseUnits",
+          p.created_at AS "createdAt",
+          p.updated_at AS "updatedAt"
+        FROM properties p
+        LEFT JOIN LATERAL (
+          SELECT contract_address
+          FROM equity_tokens
+          WHERE property_id = p.id
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) et ON true
+        LEFT JOIN LATERAL (
+          SELECT contract_address
+          FROM profit_distributors
+          WHERE property_id = p.id
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) pd ON true
+        WHERE p.chain_id = :chainId AND p.property_id = :propertyId
+        LIMIT 1
+        `,
+            {
         type: QueryTypes.SELECT,
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
@@ -108,9 +136,6 @@ export const listEquityClaims = async (req: Request, res: Response) => {
     const propertyId = validatePropertyId(req.params.propertyId);
     const limit = parseLimit(req.query.limit);
     const cursor = parseEventCursor(req.query);
-    const eventCursor = cursor
-      ? { blockNumber: cursor.cursorBlockNumber, logIndex: cursor.cursorLogIndex }
-      : null;
     const limitPlus = limit + 1;
 
     const rows = await sequelize.query(
@@ -144,8 +169,8 @@ export const listEquityClaims = async (req: Request, res: Response) => {
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           propertyId,
-          cursorBlockNumber: eventCursor?.blockNumber,
-          cursorLogIndex: eventCursor?.logIndex,
+          cursorBlockNumber: cursor?.cursorBlockNumber,
+          cursorLogIndex: cursor?.cursorLogIndex,
           limitPlus,
         },
       }
@@ -171,9 +196,6 @@ export const listProfitDeposits = async (req: Request, res: Response) => {
     const propertyId = validatePropertyId(req.params.propertyId);
     const limit = parseLimit(req.query.limit);
     const cursor = parseEventCursor(req.query);
-    const eventCursor = cursor
-      ? { blockNumber: cursor.cursorBlockNumber, logIndex: cursor.cursorLogIndex }
-      : null;
     const limitPlus = limit + 1;
 
     const rows = await sequelize.query(
@@ -206,8 +228,8 @@ export const listProfitDeposits = async (req: Request, res: Response) => {
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           propertyId,
-          cursorBlockNumber: eventCursor?.blockNumber,
-          cursorLogIndex: eventCursor?.logIndex,
+          cursorBlockNumber: cursor?.cursorBlockNumber,
+          cursorLogIndex: cursor?.cursorLogIndex,
           limitPlus,
         },
       }
@@ -233,9 +255,6 @@ export const listProfitClaims = async (req: Request, res: Response) => {
     const propertyId = validatePropertyId(req.params.propertyId);
     const limit = parseLimit(req.query.limit);
     const cursor = parseEventCursor(req.query);
-    const eventCursor = cursor
-      ? { blockNumber: cursor.cursorBlockNumber, logIndex: cursor.cursorLogIndex }
-      : null;
     const limitPlus = limit + 1;
 
     const rows = await sequelize.query(
@@ -267,8 +286,8 @@ export const listProfitClaims = async (req: Request, res: Response) => {
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           propertyId,
-          cursorBlockNumber: eventCursor?.blockNumber,
-          cursorLogIndex: eventCursor?.logIndex,
+          cursorBlockNumber: cursor?.cursorBlockNumber,
+          cursorLogIndex: cursor?.cursorLogIndex,
           limitPlus,
         },
       }
