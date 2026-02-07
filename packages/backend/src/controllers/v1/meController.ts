@@ -25,6 +25,40 @@ const requireUserAddress = (req: AuthenticatedRequest): string => {
   return normalizeAddress(req.user.address, 'address');
 };
 
+type InvestmentRow = {
+  propertyId: string;
+  campaignAddress: string;
+  investorAddress: string;
+  usdcAmountBaseUnits: string;
+  txHash: string;
+  logIndex: number;
+  blockNumber: string;
+  createdAt: string;
+};
+
+type EquityClaimRow = {
+  propertyId: string;
+  equityTokenAddress: string;
+  campaignAddress: string | null;
+  claimantAddress: string;
+  equityAmountBaseUnits: string;
+  txHash: string;
+  logIndex: number;
+  blockNumber: string;
+  createdAt: string;
+};
+
+type ProfitClaimRow = {
+  propertyId: string;
+  profitDistributorAddress: string;
+  claimerAddress: string;
+  usdcAmountBaseUnits: string;
+  txHash: string;
+  logIndex: number;
+  blockNumber: string;
+  createdAt: string;
+};
+
 export const listMyInvestments = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const investorAddress = requireUserAddress(req);
@@ -35,7 +69,7 @@ export const listMyInvestments = async (req: AuthenticatedRequest, res: Response
       : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: InvestmentRow[] = await sequelize.query<InvestmentRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -97,7 +131,7 @@ export const listMyEquityClaims = async (req: AuthenticatedRequest, res: Respons
       : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: EquityClaimRow[] = await sequelize.query<EquityClaimRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -160,7 +194,7 @@ export const listMyProfitClaims = async (req: AuthenticatedRequest, res: Respons
       : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: ProfitClaimRow[] = await sequelize.query<ProfitClaimRow>(
       `
       SELECT
         p.property_id AS "propertyId",

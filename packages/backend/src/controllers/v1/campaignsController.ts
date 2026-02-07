@@ -18,6 +18,43 @@ const handleError = (res: Response, error: unknown) => {
   return res.status(500).json({ error: 'Internal server error' });
 };
 
+type CampaignRow = {
+  propertyId: string;
+  campaignAddress: string;
+  startTime: string;
+  endTime: string | null;
+  state: string;
+  targetUsdcBaseUnits: string;
+  raisedUsdcBaseUnits: string;
+  finalizedTxHash: string | null;
+  finalizedLogIndex: number | null;
+  finalizedBlockNumber: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type CampaignInvestmentRow = {
+  propertyId: string;
+  campaignAddress: string;
+  investorAddress: string;
+  usdcAmountBaseUnits: string;
+  txHash: string;
+  logIndex: number;
+  blockNumber: string;
+  createdAt: string;
+};
+
+type CampaignRefundRow = {
+  propertyId: string;
+  campaignAddress: string;
+  investorAddress: string;
+  usdcAmountBaseUnits: string;
+  txHash: string;
+  logIndex: number;
+  blockNumber: string;
+  createdAt: string;
+};
+
 export const listCampaigns = async (req: Request, res: Response) => {
   try {
     const limit = parseLimit(req.query.limit);
@@ -27,7 +64,7 @@ export const listCampaigns = async (req: Request, res: Response) => {
       : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: CampaignRow[] = await sequelize.query<CampaignRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -83,7 +120,7 @@ export const getCampaign = async (req: Request, res: Response) => {
   try {
     const campaignAddress = normalizeAddress(req.params.campaignAddress, 'campaignAddress');
 
-    const rows = await sequelize.query(
+    const rows: CampaignRow[] = await sequelize.query<CampaignRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -133,7 +170,7 @@ export const listCampaignInvestments = async (req: Request, res: Response) => {
       : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: CampaignInvestmentRow[] = await sequelize.query<CampaignInvestmentRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -195,7 +232,7 @@ export const listCampaignRefunds = async (req: Request, res: Response) => {
       : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: CampaignRefundRow[] = await sequelize.query<CampaignRefundRow>(
       `
       SELECT
         p.property_id AS "propertyId",
