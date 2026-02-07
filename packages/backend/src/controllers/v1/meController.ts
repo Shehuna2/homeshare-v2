@@ -30,6 +30,9 @@ export const listMyInvestments = async (req: AuthenticatedRequest, res: Response
     const investorAddress = requireUserAddress(req);
     const limit = parseLimit(req.query.limit);
     const cursor = parseEventCursor(req.query);
+    const eventCursor = cursor
+      ? { blockNumber: cursor.cursorBlockNumber, logIndex: cursor.cursorLogIndex }
+      : null;
     const limitPlus = limit + 1;
 
     const rows = await sequelize.query(
@@ -62,8 +65,8 @@ export const listMyInvestments = async (req: AuthenticatedRequest, res: Response
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           investorAddress,
-          cursorBlockNumber: cursor?.cursorBlockNumber,
-          cursorLogIndex: cursor?.cursorLogIndex,
+          cursorBlockNumber: eventCursor?.blockNumber,
+          cursorLogIndex: eventCursor?.logIndex,
           limitPlus,
         },
       }
@@ -89,6 +92,9 @@ export const listMyEquityClaims = async (req: AuthenticatedRequest, res: Respons
     const claimantAddress = requireUserAddress(req);
     const limit = parseLimit(req.query.limit);
     const cursor = parseEventCursor(req.query);
+    const eventCursor = cursor
+      ? { blockNumber: cursor.cursorBlockNumber, logIndex: cursor.cursorLogIndex }
+      : null;
     const limitPlus = limit + 1;
 
     const rows = await sequelize.query(
@@ -122,8 +128,8 @@ export const listMyEquityClaims = async (req: AuthenticatedRequest, res: Respons
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           claimantAddress,
-          cursorBlockNumber: cursor?.cursorBlockNumber,
-          cursorLogIndex: cursor?.cursorLogIndex,
+          cursorBlockNumber: eventCursor?.blockNumber,
+          cursorLogIndex: eventCursor?.logIndex,
           limitPlus,
         },
       }
@@ -149,6 +155,9 @@ export const listMyProfitClaims = async (req: AuthenticatedRequest, res: Respons
     const claimerAddress = requireUserAddress(req);
     const limit = parseLimit(req.query.limit);
     const cursor = parseEventCursor(req.query);
+    const eventCursor = cursor
+      ? { blockNumber: cursor.cursorBlockNumber, logIndex: cursor.cursorLogIndex }
+      : null;
     const limitPlus = limit + 1;
 
     const rows = await sequelize.query(
@@ -180,8 +189,8 @@ export const listMyProfitClaims = async (req: AuthenticatedRequest, res: Respons
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           claimerAddress,
-          cursorBlockNumber: cursor?.cursorBlockNumber,
-          cursorLogIndex: cursor?.cursorLogIndex,
+          cursorBlockNumber: eventCursor?.blockNumber,
+          cursorLogIndex: eventCursor?.logIndex,
           limitPlus,
         },
       }
