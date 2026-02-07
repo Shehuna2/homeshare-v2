@@ -18,13 +18,61 @@ const handleError = (res: Response, error: unknown) => {
   return res.status(500).json({ error: 'Internal server error' });
 };
 
+type PropertyRow = {
+  propertyId: string;
+  name: string;
+  location: string;
+  description: string;
+  crowdfundAddress: string;
+  equityTokenAddress: string;
+  profitDistributorAddress: string;
+  targetUsdcBaseUnits: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type EquityClaimRow = {
+  propertyId: string;
+  equityTokenAddress: string;
+  campaignAddress: string | null;
+  claimantAddress: string;
+  equityAmountBaseUnits: string;
+  txHash: string;
+  logIndex: number;
+  blockNumber: string;
+  createdAt: string;
+};
+
+type ProfitDepositRow = {
+  propertyId: string;
+  profitDistributorAddress: string;
+  depositorAddress: string;
+  usdcAmountBaseUnits: string;
+  accProfitPerShare: string;
+  txHash: string;
+  logIndex: number;
+  blockNumber: string;
+  createdAt: string;
+};
+
+type ProfitClaimRow = {
+  propertyId: string;
+  profitDistributorAddress: string;
+  claimerAddress: string;
+  usdcAmountBaseUnits: string;
+  txHash: string;
+  logIndex: number;
+  blockNumber: string;
+  createdAt: string;
+};
+
 export const listProperties = async (req: Request, res: Response) => {
   try {
     const limit = parseLimit(req.query.limit);
     const cursorPropertyId = parsePropertyCursor(req.query);
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: PropertyRow[] = await sequelize.query<PropertyRow>(
       `
       SELECT
         property_id AS "propertyId",
@@ -66,7 +114,7 @@ export const getProperty = async (req: Request, res: Response) => {
   try {
     const propertyId = validatePropertyId(req.params.propertyId);
 
-    const rows = await sequelize.query(
+    const rows: PropertyRow[] = await sequelize.query<PropertyRow>(
       `
       SELECT
         property_id AS "propertyId",
@@ -108,9 +156,12 @@ export const listEquityClaims = async (req: Request, res: Response) => {
     const propertyId = validatePropertyId(req.params.propertyId);
     const limit = parseLimit(req.query.limit);
     const cursor = parseEventCursor(req.query);
+    const eventCursor = cursor
+      ? { blockNumber: cursor.cursorBlockNumber, logIndex: cursor.cursorLogIndex }
+      : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: EquityClaimRow[] = await sequelize.query<EquityClaimRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -141,8 +192,8 @@ export const listEquityClaims = async (req: Request, res: Response) => {
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           propertyId,
-          cursorBlockNumber: cursor?.cursorBlockNumber,
-          cursorLogIndex: cursor?.cursorLogIndex,
+          cursorBlockNumber: eventCursor?.blockNumber,
+          cursorLogIndex: eventCursor?.logIndex,
           limitPlus,
         },
       }
@@ -168,9 +219,12 @@ export const listProfitDeposits = async (req: Request, res: Response) => {
     const propertyId = validatePropertyId(req.params.propertyId);
     const limit = parseLimit(req.query.limit);
     const cursor = parseEventCursor(req.query);
+    const eventCursor = cursor
+      ? { blockNumber: cursor.cursorBlockNumber, logIndex: cursor.cursorLogIndex }
+      : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: ProfitDepositRow[] = await sequelize.query<ProfitDepositRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -200,8 +254,8 @@ export const listProfitDeposits = async (req: Request, res: Response) => {
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           propertyId,
-          cursorBlockNumber: cursor?.cursorBlockNumber,
-          cursorLogIndex: cursor?.cursorLogIndex,
+          cursorBlockNumber: eventCursor?.blockNumber,
+          cursorLogIndex: eventCursor?.logIndex,
           limitPlus,
         },
       }
@@ -227,9 +281,12 @@ export const listProfitClaims = async (req: Request, res: Response) => {
     const propertyId = validatePropertyId(req.params.propertyId);
     const limit = parseLimit(req.query.limit);
     const cursor = parseEventCursor(req.query);
+    const eventCursor = cursor
+      ? { blockNumber: cursor.cursorBlockNumber, logIndex: cursor.cursorLogIndex }
+      : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: ProfitClaimRow[] = await sequelize.query<ProfitClaimRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -258,8 +315,8 @@ export const listProfitClaims = async (req: Request, res: Response) => {
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           propertyId,
-          cursorBlockNumber: cursor?.cursorBlockNumber,
-          cursorLogIndex: cursor?.cursorLogIndex,
+          cursorBlockNumber: eventCursor?.blockNumber,
+          cursorLogIndex: eventCursor?.logIndex,
           limitPlus,
         },
       }

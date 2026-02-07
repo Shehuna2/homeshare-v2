@@ -18,13 +18,53 @@ const handleError = (res: Response, error: unknown) => {
   return res.status(500).json({ error: 'Internal server error' });
 };
 
+type CampaignRow = {
+  propertyId: string;
+  campaignAddress: string;
+  startTime: string;
+  endTime: string | null;
+  state: string;
+  targetUsdcBaseUnits: string;
+  raisedUsdcBaseUnits: string;
+  finalizedTxHash: string | null;
+  finalizedLogIndex: number | null;
+  finalizedBlockNumber: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type CampaignInvestmentRow = {
+  propertyId: string;
+  campaignAddress: string;
+  investorAddress: string;
+  usdcAmountBaseUnits: string;
+  txHash: string;
+  logIndex: number;
+  blockNumber: string;
+  createdAt: string;
+};
+
+type CampaignRefundRow = {
+  propertyId: string;
+  campaignAddress: string;
+  investorAddress: string;
+  usdcAmountBaseUnits: string;
+  txHash: string;
+  logIndex: number;
+  blockNumber: string;
+  createdAt: string;
+};
+
 export const listCampaigns = async (req: Request, res: Response) => {
   try {
     const limit = parseLimit(req.query.limit);
     const cursor = parseCampaignCursor(req.query);
+    const campaignCursor = cursor
+      ? { startTime: cursor.cursorStartTime, contractAddress: cursor.cursorContractAddress }
+      : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: CampaignRow[] = await sequelize.query<CampaignRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -54,8 +94,8 @@ export const listCampaigns = async (req: Request, res: Response) => {
         type: QueryTypes.SELECT,
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
-          cursorStartTime: cursor?.cursorStartTime,
-          cursorContractAddress: cursor?.cursorContractAddress,
+          cursorStartTime: campaignCursor?.startTime,
+          cursorContractAddress: campaignCursor?.contractAddress,
           limitPlus,
         },
       }
@@ -80,7 +120,7 @@ export const getCampaign = async (req: Request, res: Response) => {
   try {
     const campaignAddress = normalizeAddress(req.params.campaignAddress, 'campaignAddress');
 
-    const rows = await sequelize.query(
+    const rows: CampaignRow[] = await sequelize.query<CampaignRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -125,9 +165,12 @@ export const listCampaignInvestments = async (req: Request, res: Response) => {
     const campaignAddress = normalizeAddress(req.params.campaignAddress, 'campaignAddress');
     const limit = parseLimit(req.query.limit);
     const cursor = parseEventCursor(req.query);
+    const eventCursor = cursor
+      ? { blockNumber: cursor.cursorBlockNumber, logIndex: cursor.cursorLogIndex }
+      : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: CampaignInvestmentRow[] = await sequelize.query<CampaignInvestmentRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -157,8 +200,8 @@ export const listCampaignInvestments = async (req: Request, res: Response) => {
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           campaignAddress,
-          cursorBlockNumber: cursor?.cursorBlockNumber,
-          cursorLogIndex: cursor?.cursorLogIndex,
+          cursorBlockNumber: eventCursor?.blockNumber,
+          cursorLogIndex: eventCursor?.logIndex,
           limitPlus,
         },
       }
@@ -184,9 +227,12 @@ export const listCampaignRefunds = async (req: Request, res: Response) => {
     const campaignAddress = normalizeAddress(req.params.campaignAddress, 'campaignAddress');
     const limit = parseLimit(req.query.limit);
     const cursor = parseEventCursor(req.query);
+    const eventCursor = cursor
+      ? { blockNumber: cursor.cursorBlockNumber, logIndex: cursor.cursorLogIndex }
+      : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: CampaignRefundRow[] = await sequelize.query<CampaignRefundRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -216,8 +262,8 @@ export const listCampaignRefunds = async (req: Request, res: Response) => {
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           campaignAddress,
-          cursorBlockNumber: cursor?.cursorBlockNumber,
-          cursorLogIndex: cursor?.cursorLogIndex,
+          cursorBlockNumber: eventCursor?.blockNumber,
+          cursorLogIndex: eventCursor?.logIndex,
           limitPlus,
         },
       }

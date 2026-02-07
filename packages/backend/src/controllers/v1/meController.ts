@@ -25,14 +25,51 @@ const requireUserAddress = (req: AuthenticatedRequest): string => {
   return normalizeAddress(req.user.address, 'address');
 };
 
+type InvestmentRow = {
+  propertyId: string;
+  campaignAddress: string;
+  investorAddress: string;
+  usdcAmountBaseUnits: string;
+  txHash: string;
+  logIndex: number;
+  blockNumber: string;
+  createdAt: string;
+};
+
+type EquityClaimRow = {
+  propertyId: string;
+  equityTokenAddress: string;
+  campaignAddress: string | null;
+  claimantAddress: string;
+  equityAmountBaseUnits: string;
+  txHash: string;
+  logIndex: number;
+  blockNumber: string;
+  createdAt: string;
+};
+
+type ProfitClaimRow = {
+  propertyId: string;
+  profitDistributorAddress: string;
+  claimerAddress: string;
+  usdcAmountBaseUnits: string;
+  txHash: string;
+  logIndex: number;
+  blockNumber: string;
+  createdAt: string;
+};
+
 export const listMyInvestments = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const investorAddress = requireUserAddress(req);
     const limit = parseLimit(req.query.limit);
     const cursor = parseEventCursor(req.query);
+    const eventCursor = cursor
+      ? { blockNumber: cursor.cursorBlockNumber, logIndex: cursor.cursorLogIndex }
+      : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: InvestmentRow[] = await sequelize.query<InvestmentRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -62,8 +99,8 @@ export const listMyInvestments = async (req: AuthenticatedRequest, res: Response
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           investorAddress,
-          cursorBlockNumber: cursor?.cursorBlockNumber,
-          cursorLogIndex: cursor?.cursorLogIndex,
+          cursorBlockNumber: eventCursor?.blockNumber,
+          cursorLogIndex: eventCursor?.logIndex,
           limitPlus,
         },
       }
@@ -89,9 +126,12 @@ export const listMyEquityClaims = async (req: AuthenticatedRequest, res: Respons
     const claimantAddress = requireUserAddress(req);
     const limit = parseLimit(req.query.limit);
     const cursor = parseEventCursor(req.query);
+    const eventCursor = cursor
+      ? { blockNumber: cursor.cursorBlockNumber, logIndex: cursor.cursorLogIndex }
+      : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: EquityClaimRow[] = await sequelize.query<EquityClaimRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -122,8 +162,8 @@ export const listMyEquityClaims = async (req: AuthenticatedRequest, res: Respons
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           claimantAddress,
-          cursorBlockNumber: cursor?.cursorBlockNumber,
-          cursorLogIndex: cursor?.cursorLogIndex,
+          cursorBlockNumber: eventCursor?.blockNumber,
+          cursorLogIndex: eventCursor?.logIndex,
           limitPlus,
         },
       }
@@ -149,9 +189,12 @@ export const listMyProfitClaims = async (req: AuthenticatedRequest, res: Respons
     const claimerAddress = requireUserAddress(req);
     const limit = parseLimit(req.query.limit);
     const cursor = parseEventCursor(req.query);
+    const eventCursor = cursor
+      ? { blockNumber: cursor.cursorBlockNumber, logIndex: cursor.cursorLogIndex }
+      : null;
     const limitPlus = limit + 1;
 
-    const rows = await sequelize.query(
+    const rows: ProfitClaimRow[] = await sequelize.query<ProfitClaimRow>(
       `
       SELECT
         p.property_id AS "propertyId",
@@ -180,8 +223,8 @@ export const listMyProfitClaims = async (req: AuthenticatedRequest, res: Respons
         replacements: {
           chainId: BASE_SEPOLIA_CHAIN_ID,
           claimerAddress,
-          cursorBlockNumber: cursor?.cursorBlockNumber,
-          cursorLogIndex: cursor?.cursorLogIndex,
+          cursorBlockNumber: eventCursor?.blockNumber,
+          cursorLogIndex: eventCursor?.logIndex,
           limitPlus,
         },
       }
