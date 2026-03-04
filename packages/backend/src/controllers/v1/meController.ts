@@ -1,4 +1,5 @@
 import { Response } from 'express';
+import { Interface, JsonRpcProvider } from 'ethers';
 import { QueryTypes } from 'sequelize';
 import { sequelize } from '../../db/index.js';
 import { AuthenticatedRequest } from '../../middleware/auth.js';
@@ -59,6 +60,19 @@ type ProfitClaimRow = {
   blockNumber: string;
   createdAt: string;
 };
+
+type ProfitStatusRow = {
+  propertyId: string;
+  profitDistributorAddress: string;
+  totalDepositedBaseUnits: string;
+  totalClaimedBaseUnits: string;
+  unclaimedPoolBaseUnits: string;
+  lastDepositAt: string | null;
+};
+
+const distributorReadInterface = new Interface([
+  'function claimable(address user) view returns (uint256)',
+]);
 
 export const listMyInvestments = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -241,6 +255,93 @@ export const listMyProfitClaims = async (req: AuthenticatedRequest, res: Respons
         : null;
 
     return res.json({ profitClaims: items, nextCursor });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
+export const listMyProfitStatus = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const investorAddress = requireUserAddress(req);
+    const rows: ProfitStatusRow[] = await sequelize.query<ProfitStatusRow>(
+      `
+      WITH invested AS (
+        SELECT DISTINCT p.id, p.property_id, LOWER(p.profit_distributor_address) AS profit_distributor_address
+        FROM campaign_investments ci
+        JOIN properties p ON p.id = ci.property_id
+        WHERE ci.chain_id = :chainId
+          AND ci.investor_address = :investorAddress
+      )
+      SELECT
+        invested.property_id AS "propertyId",
+        invested.profit_distributor_address AS "profitDistributorAddress",
+        COALESCE(dep.total_deposited, 0)::text AS "totalDepositedBaseUnits",
+        COALESCE(clm.total_claimed, 0)::text AS "totalClaimedBaseUnits",
+        (COALESCE(dep.total_deposited, 0) - COALESCE(clm.total_claimed, 0))::text AS "unclaimedPoolBaseUnits",
+        dep.last_deposit_at AS "lastDepositAt"
+      FROM invested
+      LEFT JOIN LATERAL (
+        SELECT
+          SUM(pd.usdc_amount_base_units) AS total_deposited,
+          MAX(pd.created_at) AS last_deposit_at
+        FROM profit_deposits pd
+        WHERE pd.chain_id = :chainId
+          AND pd.property_id = invested.id
+      ) dep ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT SUM(pc.usdc_amount_base_units) AS total_claimed
+        FROM profit_claims pc
+        WHERE pc.chain_id = :chainId
+          AND pc.property_id = invested.id
+      ) clm ON TRUE
+      ORDER BY invested.property_id ASC
+      `,
+      {
+        type: QueryTypes.SELECT,
+        replacements: {
+          chainId: BASE_SEPOLIA_CHAIN_ID,
+          investorAddress,
+        },
+      }
+    );
+
+    const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL || process.env.BASE_MAINNET_RPC_URL || '';
+    if (!rpcUrl) {
+      return res.json({
+        statuses: rows.map((row) => ({
+          ...row,
+          claimableBaseUnits: null,
+          claimableError: 'RPC unavailable',
+        })),
+      });
+    }
+
+    const provider = new JsonRpcProvider(rpcUrl);
+    const statuses = await Promise.all(
+      rows.map(async (row) => {
+        try {
+          const data = distributorReadInterface.encodeFunctionData('claimable', [investorAddress]);
+          const raw = await provider.call({
+            to: row.profitDistributorAddress,
+            data,
+          });
+          const [claimable] = distributorReadInterface.decodeFunctionResult('claimable', raw);
+          return {
+            ...row,
+            claimableBaseUnits: claimable.toString(),
+            claimableError: null,
+          };
+        } catch (error) {
+          return {
+            ...row,
+            claimableBaseUnits: null,
+            claimableError: error instanceof Error ? error.message : 'claimable-read-failed',
+          };
+        }
+      })
+    );
+
+    return res.json({ statuses });
   } catch (error) {
     return handleError(res, error);
   }

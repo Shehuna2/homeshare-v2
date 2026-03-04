@@ -27,7 +27,17 @@ export interface PropertyIntentPayload {
   name: string;
   description: string;
   location: string;
+  imageUrl?: string;
+  imageUrls?: string[];
+  youtubeEmbedUrl?: string;
   targetUsdcBaseUnits: string;
+  estimatedSellUsdcBaseUnits?: string | null;
+  conservativeSellUsdcBaseUnits?: string | null;
+  baseSellUsdcBaseUnits?: string | null;
+  optimisticSellUsdcBaseUnits?: string | null;
+  conservativeMultiplierBps?: number | null;
+  baseMultiplierBps?: number | null;
+  optimisticMultiplierBps?: number | null;
   startTime?: string;
   endTime?: string;
   crowdfundAddress?: string;
@@ -47,7 +57,27 @@ export interface ProfitDistributionIntentPayload {
   usdcAmountBaseUnits: string;
 }
 
+export interface AdminIntentBatchPayload {
+  chainId?: number;
+  includeProfitIntent: boolean;
+  includePlatformFeeIntent: boolean;
+  propertyId?: string;
+  profitDistributorAddress?: string;
+  usdcAmountBaseUnits?: string;
+  campaignAddress?: string;
+  platformFeeBps?: number;
+  platformFeeRecipient?: string | null;
+}
+
+export interface ProfitAllowanceApprovalPayload {
+  chainId?: number;
+  propertyId: string;
+  usdcAmountBaseUnits: string;
+  mode?: 'exact' | 'max';
+}
+
 export type IntentStatus = 'pending' | 'submitted' | 'confirmed' | 'failed';
+export type IntentType = 'property' | 'profit' | 'platformFee';
 
 export interface PropertyIntentResponse {
   id: string;
@@ -56,7 +86,17 @@ export interface PropertyIntentResponse {
   name: string;
   location: string;
   description: string;
+  imageUrl: string | null;
+  imageUrls: string[];
+  youtubeEmbedUrl: string | null;
   targetUsdcBaseUnits: string;
+  estimatedSellUsdcBaseUnits: string | null;
+  conservativeSellUsdcBaseUnits: string | null;
+  baseSellUsdcBaseUnits: string | null;
+  optimisticSellUsdcBaseUnits: string | null;
+  conservativeMultiplierBps: number | null;
+  baseMultiplierBps: number | null;
+  optimisticMultiplierBps: number | null;
   startTime: string | null;
   endTime: string | null;
   crowdfundAddress: string | null;
@@ -107,14 +147,28 @@ export interface PropertyResponse {
   name: string;
   description: string;
   location: string;
+  imageUrl: string | null;
+  imageUrls: string[];
+  youtubeEmbedUrl: string | null;
   crowdfundAddress: string;
   equityTokenAddress: string;
   profitDistributorAddress: string;
   targetUsdcBaseUnits: string;
+  estimatedSellUsdcBaseUnits: string | null;
+  conservativeSellUsdcBaseUnits: string | null;
+  baseSellUsdcBaseUnits: string | null;
+  optimisticSellUsdcBaseUnits: string | null;
+  conservativeMultiplierBps: number | null;
+  baseMultiplierBps: number | null;
+  optimisticMultiplierBps: number | null;
   platformFeeBps: number | null;
   platformFeeRecipient: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AdminPropertyResponse extends PropertyResponse {
+  archivedAt: string | null;
 }
 
 export interface CampaignResponse {
@@ -168,6 +222,17 @@ export interface ProfitClaimResponse {
   createdAt: string;
 }
 
+export interface InvestorProfitStatusResponse {
+  propertyId: string;
+  profitDistributorAddress: string;
+  totalDepositedBaseUnits: string;
+  totalClaimedBaseUnits: string;
+  unclaimedPoolBaseUnits: string;
+  lastDepositAt: string | null;
+  claimableBaseUnits: string | null;
+  claimableError: string | null;
+}
+
 export interface EthUsdcQuoteResponse {
   chainId: number;
   usdcAddress: string;
@@ -196,6 +261,40 @@ export interface AdminMetricsResponse {
       chainId: number;
       lastIndexedBlock: number;
     }>;
+  };
+  health?: {
+    checks: {
+      rpcConfigured: boolean;
+      indexerHealthy: boolean;
+      workersHealthy: boolean;
+    };
+    staleSubmittedIntents: number;
+  };
+  intents?: {
+    property: {
+      pending: number;
+      submitted: number;
+      confirmed: number;
+      failed: number;
+    };
+    profit: {
+      pending: number;
+      submitted: number;
+      confirmed: number;
+      failed: number;
+    };
+    platformFee: {
+      pending: number;
+      submitted: number;
+      confirmed: number;
+      failed: number;
+    };
+    totals: {
+      pending: number;
+      submitted: number;
+      confirmed: number;
+      failed: number;
+    };
   };
 }
 
@@ -246,6 +345,106 @@ export interface ProfitFlowStatusResponse {
   unclaimedPoolBaseUnits: string;
 }
 
+export interface PlatformFeePreflightResponse {
+  campaignAddress: string;
+  chainId: number;
+  operatorAddress: string | null;
+  contractOwner: string;
+  requested: {
+    platformFeeBps: number;
+    platformFeeRecipient: string;
+  };
+  current: {
+    platformFeeBps: number;
+    platformFeeRecipient: string;
+  };
+  checks: {
+    operatorConfigured: boolean;
+    ownerMatchesOperator: boolean;
+    recipientValid: boolean;
+    alreadyApplied: boolean;
+    indexerHealthy: boolean;
+    workersHealthy: boolean;
+  };
+  observability: {
+    indexerLastBlock: number;
+    staleSubmittedIntents: number;
+  };
+}
+
+export interface PlatformFeeFlowStatusResponse {
+  campaignAddress: string;
+  flags: {
+    intentSubmitted: boolean;
+    intentConfirmed: boolean;
+    campaignMatchesTarget: boolean;
+  };
+  latestIntent: {
+    id: string;
+    status: string;
+    submittedAt: string | null;
+    confirmedAt: string | null;
+    txHash: string | null;
+    platformFeeBps: number;
+    platformFeeRecipient: string | null;
+    createdAt: string;
+  } | null;
+  currentCampaign: {
+    platformFeeBps: number | null;
+    platformFeeRecipient: string | null;
+    updatedAt: string;
+  } | null;
+  target: {
+    platformFeeBps: number | null;
+    platformFeeRecipient: string | null;
+  };
+}
+
+export interface ProfitAllowanceApprovalResponse {
+  propertyId: string;
+  chainId: number;
+  profitDistributorAddress: string;
+  usdcTokenAddress: string;
+  operatorAddress: string;
+  mode: 'exact' | 'max';
+  requiredUsdcAmountBaseUnits: string;
+  approvedUsdcAmountBaseUnits: string;
+  allowanceBeforeBaseUnits: string;
+  allowanceAfterBaseUnits: string;
+  txHash: string | null;
+  resetTxHash: string | null;
+  usedResetFlow: boolean;
+  checks: {
+    ownerMatchesOperator: boolean;
+    hasSufficientAllowance: boolean;
+  };
+}
+
+export interface AdminIntentBatchResponse {
+  profitIntent: ProfitDistributionIntentResponse | null;
+  platformFeeIntent: PlatformFeeIntentResponse | null;
+}
+
+export interface IntentActionResponse {
+  intentType: IntentType;
+  intent: {
+    id: string;
+    status: IntentStatus;
+    attemptCount: number;
+    updatedAt: string;
+  };
+}
+
+export interface CloudinaryUploadSignatureResponse {
+  cloudName: string;
+  apiKey: string;
+  timestamp: string;
+  signature: string;
+  folder: string;
+  publicId: string | null;
+  uploadUrl: string;
+}
+
 export async function loginWithWallet(payload: {
   address: string;
   signature: string;
@@ -286,7 +485,17 @@ export async function createPropertyIntent(payload: PropertyIntentPayload, token
       name: payload.name,
       location: payload.location,
       description: payload.description,
+      imageUrl: payload.imageUrl ?? null,
+      imageUrls: payload.imageUrls ?? [],
+      youtubeEmbedUrl: payload.youtubeEmbedUrl ?? null,
       targetUsdcBaseUnits: payload.targetUsdcBaseUnits,
+      estimatedSellUsdcBaseUnits: payload.estimatedSellUsdcBaseUnits ?? null,
+      conservativeSellUsdcBaseUnits: payload.conservativeSellUsdcBaseUnits ?? null,
+      baseSellUsdcBaseUnits: payload.baseSellUsdcBaseUnits ?? null,
+      optimisticSellUsdcBaseUnits: payload.optimisticSellUsdcBaseUnits ?? null,
+      conservativeMultiplierBps: payload.conservativeMultiplierBps ?? null,
+      baseMultiplierBps: payload.baseMultiplierBps ?? null,
+      optimisticMultiplierBps: payload.optimisticMultiplierBps ?? null,
       startTime: payload.startTime ?? null,
       endTime: payload.endTime ?? null,
       crowdfundAddress: payload.crowdfundAddress,
@@ -296,6 +505,32 @@ export async function createPropertyIntent(payload: PropertyIntentPayload, token
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: 'Failed to create property intent' }));
     throw new Error(error.error || 'Failed to create property intent');
+  }
+
+  return response.json();
+}
+
+export async function createCloudinaryUploadSignature(
+  token: string,
+  payload?: { folder?: string; publicId?: string }
+): Promise<CloudinaryUploadSignatureResponse> {
+  const response = await fetch(`${API_V1_BASE}/admin/media/cloudinary/signature`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      folder: payload?.folder ?? 'homeshare/properties',
+      publicId: payload?.publicId ?? null,
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ error: 'Failed to create Cloudinary upload signature' }));
+    throw new Error(error.error || 'Failed to create Cloudinary upload signature');
   }
 
   return response.json();
@@ -350,6 +585,99 @@ export async function createProfitDistributionIntent(
     throw new Error(error.error || 'Failed to create profit intent');
   }
 
+  return response.json();
+}
+
+export async function approveProfitAllowance(
+  payload: ProfitAllowanceApprovalPayload,
+  token: string
+): Promise<ProfitAllowanceApprovalResponse> {
+  const response = await fetch(`${API_V1_BASE}/admin/profits/approve`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      chainId: payload.chainId ?? 84532,
+      propertyId: payload.propertyId,
+      usdcAmountBaseUnits: payload.usdcAmountBaseUnits,
+      mode: payload.mode ?? 'max',
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to approve USDC allowance' }));
+    throw new Error(error.error || 'Failed to approve USDC allowance');
+  }
+
+  return response.json();
+}
+
+export async function createAdminIntentBatch(
+  payload: AdminIntentBatchPayload,
+  token: string
+): Promise<AdminIntentBatchResponse> {
+  const response = await fetch(`${API_V1_BASE}/admin/intents/batch`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      chainId: payload.chainId ?? 84532,
+      includeProfitIntent: payload.includeProfitIntent,
+      includePlatformFeeIntent: payload.includePlatformFeeIntent,
+      propertyId: payload.propertyId,
+      profitDistributorAddress: payload.profitDistributorAddress,
+      usdcAmountBaseUnits: payload.usdcAmountBaseUnits,
+      campaignAddress: payload.campaignAddress,
+      platformFeeBps: payload.platformFeeBps,
+      platformFeeRecipient: payload.platformFeeRecipient ?? null,
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to create batch intents' }));
+    throw new Error(error.error || 'Failed to create batch intents');
+  }
+
+  return response.json();
+}
+
+export async function retryAdminIntent(
+  token: string,
+  intentType: IntentType,
+  intentId: string
+): Promise<IntentActionResponse> {
+  const response = await fetch(`${API_V1_BASE}/admin/intents/${intentType}/${intentId}/retry`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to retry intent' }));
+    throw new Error(error.error || 'Failed to retry intent');
+  }
+  return response.json();
+}
+
+export async function resetAdminIntent(
+  token: string,
+  intentType: IntentType,
+  intentId: string
+): Promise<IntentActionResponse> {
+  const response = await fetch(`${API_V1_BASE}/admin/intents/${intentType}/${intentId}/reset`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to reset intent' }));
+    throw new Error(error.error || 'Failed to reset intent');
+  }
   return response.json();
 }
 
@@ -445,6 +773,66 @@ export async function fetchProfitFlowStatus(
   return response.json();
 }
 
+export async function fetchPlatformFeePreflight(
+  token: string,
+  params: {
+    campaignAddress: string;
+    platformFeeBps: number;
+    platformFeeRecipient?: string | null;
+  }
+): Promise<PlatformFeePreflightResponse> {
+  const search = new URLSearchParams({
+    campaignAddress: params.campaignAddress,
+    platformFeeBps: String(params.platformFeeBps),
+  });
+  if (params.platformFeeRecipient) {
+    search.set('platformFeeRecipient', params.platformFeeRecipient);
+  }
+  const response = await fetch(`${API_V1_BASE}/admin/platform-fees/preflight?${search.toString()}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ error: 'Failed to fetch platform fee preflight' }));
+    throw new Error(error.error || 'Failed to fetch platform fee preflight');
+  }
+  return response.json();
+}
+
+export async function fetchPlatformFeeFlowStatus(
+  token: string,
+  params: {
+    campaignAddress: string;
+    platformFeeBps?: number;
+    platformFeeRecipient?: string | null;
+  }
+): Promise<PlatformFeeFlowStatusResponse> {
+  const search = new URLSearchParams({
+    campaignAddress: params.campaignAddress,
+  });
+  if (params.platformFeeBps !== undefined) {
+    search.set('platformFeeBps', String(params.platformFeeBps));
+  }
+  if (params.platformFeeRecipient) {
+    search.set('platformFeeRecipient', params.platformFeeRecipient);
+  }
+  const response = await fetch(`${API_V1_BASE}/admin/platform-fees/flow-status?${search.toString()}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ error: 'Failed to fetch platform fee flow status' }));
+    throw new Error(error.error || 'Failed to fetch platform fee flow status');
+  }
+  return response.json();
+}
+
 export async function fetchProperties(): Promise<PropertyResponse[]> {
   const response = await fetch(`${API_V1_BASE}/properties`);
 
@@ -454,6 +842,100 @@ export async function fetchProperties(): Promise<PropertyResponse[]> {
 
   const data = await response.json();
   return data.properties ?? [];
+}
+
+export async function fetchAdminProperties(
+  token: string,
+  includeArchived = true
+): Promise<AdminPropertyResponse[]> {
+  const search = new URLSearchParams({
+    includeArchived: includeArchived ? 'true' : 'false',
+  });
+  const response = await fetch(`${API_V1_BASE}/admin/properties?${search.toString()}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to fetch admin properties' }));
+    throw new Error(error.error || 'Failed to fetch admin properties');
+  }
+  const data = await response.json();
+  return data.properties ?? [];
+}
+
+export async function updateAdminProperty(
+  token: string,
+  propertyId: string,
+  payload: {
+    name?: string;
+    location?: string;
+    description?: string;
+    imageUrl?: string | null;
+    imageUrls?: string[] | null;
+    youtubeEmbedUrl?: string | null;
+    estimatedSellUsdcBaseUnits?: string | null;
+    conservativeSellUsdcBaseUnits?: string | null;
+    baseSellUsdcBaseUnits?: string | null;
+    optimisticSellUsdcBaseUnits?: string | null;
+    conservativeMultiplierBps?: number | null;
+    baseMultiplierBps?: number | null;
+    optimisticMultiplierBps?: number | null;
+  }
+): Promise<AdminPropertyResponse> {
+  const response = await fetch(`${API_V1_BASE}/admin/properties/${encodeURIComponent(propertyId)}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to update property' }));
+    throw new Error(error.error || 'Failed to update property');
+  }
+  const data = await response.json();
+  return data.property as AdminPropertyResponse;
+}
+
+export async function archiveAdminProperty(
+  token: string,
+  propertyId: string
+): Promise<AdminPropertyResponse> {
+  const response = await fetch(`${API_V1_BASE}/admin/properties/${encodeURIComponent(propertyId)}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to archive property' }));
+    throw new Error(error.error || 'Failed to archive property');
+  }
+  const data = await response.json();
+  return data.property as AdminPropertyResponse;
+}
+
+export async function restoreAdminProperty(
+  token: string,
+  propertyId: string
+): Promise<AdminPropertyResponse> {
+  const response = await fetch(
+    `${API_V1_BASE}/admin/properties/${encodeURIComponent(propertyId)}/restore`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Failed to restore property' }));
+    throw new Error(error.error || 'Failed to restore property');
+  }
+  const data = await response.json();
+  return data.property as AdminPropertyResponse;
 }
 
 export async function fetchProperty(propertyId: string): Promise<PropertyResponse> {
@@ -559,6 +1041,24 @@ export async function fetchMyProfitClaims(token: string): Promise<ProfitClaimRes
 
   const data = await response.json();
   return data.profitClaims ?? [];
+}
+
+export async function fetchMyProfitStatus(token: string): Promise<InvestorProfitStatusResponse[]> {
+  const response = await fetch(`${API_V1_BASE}/me/profit-status`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error('Please authenticate to view your profit status');
+    }
+    throw new Error('Failed to fetch profit status');
+  }
+
+  const data = await response.json();
+  return data.statuses ?? [];
 }
 
 export async function fetchEthUsdcQuote(payload: {

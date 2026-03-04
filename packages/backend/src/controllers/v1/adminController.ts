@@ -1,8 +1,9 @@
 import { Response } from 'express';
-import { randomUUID } from 'crypto';
-import { Interface, JsonRpcProvider, Wallet } from 'ethers';
+import { createHash, randomUUID } from 'crypto';
+import { Contract, Interface, JsonRpcProvider, MaxUint256, Wallet } from 'ethers';
 import { QueryTypes } from 'sequelize';
 import { sequelize } from '../../db/index.js';
+import { env } from '../../config/env.js';
 import { AuthenticatedRequest } from '../../middleware/auth.js';
 import { sendError } from '../../lib/apiError.js';
 import {
@@ -47,6 +48,22 @@ const parseIntentStatus = (value: unknown): 'pending' | 'submitted' | 'confirmed
   return normalized;
 };
 
+type IntentTableKey = 'property' | 'profit' | 'platformFee';
+
+const parseIntentTable = (value: unknown): IntentTableKey => {
+  const normalized = value?.toString().trim().toLowerCase();
+  if (normalized === 'property') return 'property';
+  if (normalized === 'profit') return 'profit';
+  if (normalized === 'platformfee' || normalized === 'platform-fee') return 'platformFee';
+  throw new ValidationError('Invalid intent type. Use property, profit, or platformFee');
+};
+
+const getIntentTableName = (intentType: IntentTableKey): string => {
+  if (intentType === 'property') return 'property_intents';
+  if (intentType === 'profit') return 'profit_distribution_intents';
+  return 'platform_fee_intents';
+};
+
 const parseOptionalTimestamp = (value: unknown, field: string): string | null => {
   if (value === undefined || value === null || value === '') {
     return null;
@@ -58,15 +75,146 @@ const parseOptionalTimestamp = (value: unknown, field: string): string | null =>
   return parsed.toISOString();
 };
 
+const parseOptionalBaseUnits = (value: unknown, field: string): string | null => {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  return parseBaseUnits(value, field);
+};
+
+const parseOptionalMultiplierBps = (value: unknown, field: string): number | null => {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 100000) {
+    throw new ValidationError(`Invalid ${field}. Use an integer between 1 and 100000`);
+  }
+  return parsed;
+};
+
+const parseOptionalHttpUrl = (value: unknown, field: string): string | null => {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const raw = value.toString().trim();
+  if (!raw) {
+    return null;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new ValidationError(`Invalid ${field}`);
+  }
+  const protocol = parsed.protocol.toLowerCase();
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    throw new ValidationError(`Invalid ${field}`);
+  }
+  if (raw.length > 2048) {
+    throw new ValidationError(`${field} is too long`);
+  }
+  return parsed.toString();
+};
+
+const parseOptionalImageUrls = (value: unknown): string[] => {
+  if (value === undefined || value === null || value === '') {
+    return [];
+  }
+  let rawValues: string[];
+  if (Array.isArray(value)) {
+    rawValues = value.map((entry) => entry?.toString?.() ?? '');
+  } else if (typeof value === 'string') {
+    rawValues = value.split(/\n|,/g);
+  } else {
+    throw new ValidationError('Invalid imageUrls. Provide an array of URLs');
+  }
+
+  const urls: string[] = [];
+  for (const raw of rawValues) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    const normalized = parseOptionalHttpUrl(trimmed, 'imageUrls');
+    if (normalized && !urls.includes(normalized)) {
+      urls.push(normalized);
+    }
+  }
+  if (urls.length > 30) {
+    throw new ValidationError('imageUrls cannot exceed 30 items');
+  }
+  return urls;
+};
+
+const normalizeOptionalIdentifier = (value: unknown): string | null => {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const raw = value.toString().trim();
+  if (!raw) {
+    return null;
+  }
+  if (!/^[A-Za-z0-9/_-]{1,120}$/.test(raw)) {
+    throw new ValidationError('Invalid identifier format');
+  }
+  return raw;
+};
+
+const createCloudinarySignature = (params: Record<string, string>, apiSecret: string): string => {
+  const payload = Object.keys(params)
+    .sort()
+    .map((key) => `${key}=${params[key]}`)
+    .join('&');
+  return createHash('sha1')
+    .update(`${payload}${apiSecret}`)
+    .digest('hex');
+};
+
+const normalizeYoutubeEmbedUrl = (value: unknown): string | null => {
+  const normalizedUrl = parseOptionalHttpUrl(value, 'youtubeEmbedUrl');
+  if (!normalizedUrl) {
+    return null;
+  }
+
+  const parsed = new URL(normalizedUrl);
+  const hostname = parsed.hostname.toLowerCase().replace(/^www\./, '');
+  let videoId = '';
+
+  if (hostname === 'youtu.be') {
+    videoId = parsed.pathname.split('/').filter(Boolean)[0] ?? '';
+  } else if (hostname === 'youtube.com' || hostname === 'm.youtube.com') {
+    if (parsed.pathname === '/watch') {
+      videoId = parsed.searchParams.get('v') ?? '';
+    } else if (parsed.pathname.startsWith('/embed/')) {
+      videoId = parsed.pathname.split('/')[2] ?? '';
+    } else if (parsed.pathname.startsWith('/shorts/')) {
+      videoId = parsed.pathname.split('/')[2] ?? '';
+    }
+  }
+
+  if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) {
+    throw new ValidationError(
+      'Invalid youtubeEmbedUrl. Use a valid YouTube watch/share/embed URL'
+    );
+  }
+
+  return `https://www.youtube.com/embed/${videoId}`;
+};
+
 const profitReadInterface = new Interface([
   'function owner() view returns (address)',
   'function usdcToken() view returns (address)',
+]);
+const crowdfundReadInterface = new Interface([
+  'function owner() view returns (address)',
+  'function platformFeeBps() view returns (uint16)',
+  'function platformFeeRecipient() view returns (address)',
 ]);
 
 const erc20ReadInterface = new Interface([
   'function balanceOf(address account) view returns (uint256)',
   'function allowance(address owner, address spender) view returns (uint256)',
 ]);
+const erc20WriteAbi = ['function approve(address spender, uint256 amount) returns (bool)'];
 
 const getOperatorAddress = (): string | null => {
   const key =
@@ -86,6 +234,44 @@ const getOperatorAddress = (): string | null => {
   }
 };
 
+const getPlatformOperatorAddress = (): string | null => {
+  const key =
+    process.env.PLATFORM_OPERATOR_PRIVATE_KEY ||
+    process.env.PROFIT_OPERATOR_PRIVATE_KEY ||
+    process.env.PRIVATE_KEY ||
+    '';
+  const ZERO_PRIVATE_KEY =
+    '0x0000000000000000000000000000000000000000000000000000000000000000';
+  if (!key || key === ZERO_PRIVATE_KEY) {
+    return null;
+  }
+  try {
+    return new Wallet(key).address.toLowerCase();
+  } catch {
+    return null;
+  }
+};
+
+const getOperatorPrivateKey = (): string | null => {
+  const key =
+    process.env.PROFIT_OPERATOR_PRIVATE_KEY ||
+    process.env.PLATFORM_OPERATOR_PRIVATE_KEY ||
+    process.env.PRIVATE_KEY ||
+    '';
+  const ZERO_PRIVATE_KEY =
+    '0x0000000000000000000000000000000000000000000000000000000000000000';
+  if (!key || key === ZERO_PRIVATE_KEY) {
+    return null;
+  }
+  try {
+    // Validate key format.
+    void new Wallet(key);
+    return key;
+  } catch {
+    return null;
+  }
+};
+
 export const createPropertyIntent = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const adminAddress = requireAdminAddress(req);
@@ -94,7 +280,38 @@ export const createPropertyIntent = async (req: AuthenticatedRequest, res: Respo
     const name = req.body.name?.toString().trim();
     const location = req.body.location?.toString().trim();
     const description = req.body.description?.toString().trim();
+    const imageUrl = parseOptionalHttpUrl(req.body.imageUrl, 'imageUrl');
+    const imageUrls = parseOptionalImageUrls(req.body.imageUrls);
+    const youtubeEmbedUrl = normalizeYoutubeEmbedUrl(req.body.youtubeEmbedUrl);
     const targetUsdcBaseUnits = parseBaseUnits(req.body.targetUsdcBaseUnits, 'targetUsdcBaseUnits');
+    const estimatedSellUsdcBaseUnits = parseOptionalBaseUnits(
+      req.body.estimatedSellUsdcBaseUnits,
+      'estimatedSellUsdcBaseUnits'
+    );
+    const conservativeSellUsdcBaseUnits = parseOptionalBaseUnits(
+      req.body.conservativeSellUsdcBaseUnits,
+      'conservativeSellUsdcBaseUnits'
+    );
+    const baseSellUsdcBaseUnits = parseOptionalBaseUnits(
+      req.body.baseSellUsdcBaseUnits,
+      'baseSellUsdcBaseUnits'
+    );
+    const optimisticSellUsdcBaseUnits = parseOptionalBaseUnits(
+      req.body.optimisticSellUsdcBaseUnits,
+      'optimisticSellUsdcBaseUnits'
+    );
+    const conservativeMultiplierBps = parseOptionalMultiplierBps(
+      req.body.conservativeMultiplierBps,
+      'conservativeMultiplierBps'
+    );
+    const baseMultiplierBps = parseOptionalMultiplierBps(
+      req.body.baseMultiplierBps,
+      'baseMultiplierBps'
+    );
+    const optimisticMultiplierBps = parseOptionalMultiplierBps(
+      req.body.optimisticMultiplierBps,
+      'optimisticMultiplierBps'
+    );
     const startTime = parseOptionalTimestamp(req.body.startTime, 'startTime');
     const endTime = parseOptionalTimestamp(req.body.endTime, 'endTime');
     const crowdfundContractAddress = req.body.crowdfundAddress ?? req.body.crowdfundContractAddress;
@@ -120,6 +337,7 @@ export const createPropertyIntent = async (req: AuthenticatedRequest, res: Respo
     if (!description) {
       throw new ValidationError('Missing description');
     }
+    const mergedGallery = imageUrl && !imageUrls.includes(imageUrl) ? [imageUrl, ...imageUrls] : imageUrls;
 
     const [rows] = await sequelize.query(
       `
@@ -130,7 +348,17 @@ export const createPropertyIntent = async (req: AuthenticatedRequest, res: Respo
         name,
         location,
         description,
+        image_url,
+        gallery_image_urls,
+        youtube_embed_url,
         target_usdc_base_units,
+        estimated_sell_usdc_base_units,
+        conservative_sell_usdc_base_units,
+        base_sell_usdc_base_units,
+        optimistic_sell_usdc_base_units,
+        conservative_multiplier_bps,
+        base_multiplier_bps,
+        optimistic_multiplier_bps,
         start_time,
         end_time,
         crowdfund_contract_address,
@@ -143,7 +371,17 @@ export const createPropertyIntent = async (req: AuthenticatedRequest, res: Respo
         :name,
         :location,
         :description,
+        :imageUrl,
+        :galleryImageUrls,
+        :youtubeEmbedUrl,
         :targetUsdcBaseUnits,
+        :estimatedSellUsdcBaseUnits,
+        :conservativeSellUsdcBaseUnits,
+        :baseSellUsdcBaseUnits,
+        :optimisticSellUsdcBaseUnits,
+        :conservativeMultiplierBps,
+        :baseMultiplierBps,
+        :optimisticMultiplierBps,
         :startTime,
         :endTime,
         :crowdfundContractAddress,
@@ -154,7 +392,17 @@ export const createPropertyIntent = async (req: AuthenticatedRequest, res: Respo
         name,
         location,
         description,
+        image_url AS "imageUrl",
+        gallery_image_urls AS "imageUrls",
+        youtube_embed_url AS "youtubeEmbedUrl",
         target_usdc_base_units::text AS "targetUsdcBaseUnits",
+        estimated_sell_usdc_base_units::text AS "estimatedSellUsdcBaseUnits",
+        conservative_sell_usdc_base_units::text AS "conservativeSellUsdcBaseUnits",
+        base_sell_usdc_base_units::text AS "baseSellUsdcBaseUnits",
+        optimistic_sell_usdc_base_units::text AS "optimisticSellUsdcBaseUnits",
+        conservative_multiplier_bps AS "conservativeMultiplierBps",
+        base_multiplier_bps AS "baseMultiplierBps",
+        optimistic_multiplier_bps AS "optimisticMultiplierBps",
         start_time AS "startTime",
         end_time AS "endTime",
         LOWER(crowdfund_contract_address) AS "crowdfundAddress",
@@ -174,7 +422,17 @@ export const createPropertyIntent = async (req: AuthenticatedRequest, res: Respo
           name,
           location,
           description,
+          imageUrl,
+          galleryImageUrls: JSON.stringify(mergedGallery),
+          youtubeEmbedUrl,
           targetUsdcBaseUnits,
+          estimatedSellUsdcBaseUnits,
+          conservativeSellUsdcBaseUnits,
+          baseSellUsdcBaseUnits,
+          optimisticSellUsdcBaseUnits,
+          conservativeMultiplierBps,
+          baseMultiplierBps,
+          optimisticMultiplierBps,
           startTime,
           endTime,
           crowdfundContractAddress: crowdfundAddress,
@@ -314,6 +572,208 @@ export const createPlatformFeeIntent = async (req: AuthenticatedRequest, res: Re
   }
 };
 
+export const createCloudinaryUploadSignature = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    requireAdminAddress(req);
+
+    if (!env.cloudinaryCloudName || !env.cloudinaryApiKey || !env.cloudinaryApiSecret) {
+      return sendError(
+        res,
+        400,
+        'Cloudinary is not configured on backend. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET',
+        'bad_request'
+      );
+    }
+
+    const folder = normalizeOptionalIdentifier(req.body.folder) ?? 'homeshare/properties';
+    const publicId = normalizeOptionalIdentifier(req.body.publicId);
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+
+    const paramsToSign: Record<string, string> = {
+      folder,
+      timestamp,
+    };
+    if (publicId) {
+      paramsToSign.public_id = publicId;
+    }
+
+    const signature = createCloudinarySignature(paramsToSign, env.cloudinaryApiSecret);
+    const uploadUrl = `https://api.cloudinary.com/v1_1/${env.cloudinaryCloudName}/image/upload`;
+
+    return res.json({
+      cloudName: env.cloudinaryCloudName,
+      apiKey: env.cloudinaryApiKey,
+      timestamp,
+      signature,
+      folder,
+      publicId,
+      uploadUrl,
+    });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
+export const createIntentBatch = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const adminAddress = requireAdminAddress(req);
+    const chainId = validateChainId(req.body.chainId ?? BASE_SEPOLIA_CHAIN_ID);
+    const includeProfitIntent =
+      req.body.includeProfitIntent === undefined ? true : Boolean(req.body.includeProfitIntent);
+    const includePlatformFeeIntent =
+      req.body.includePlatformFeeIntent === undefined
+        ? true
+        : Boolean(req.body.includePlatformFeeIntent);
+
+    if (!includeProfitIntent && !includePlatformFeeIntent) {
+      throw new ValidationError(
+        'At least one of includeProfitIntent or includePlatformFeeIntent must be true'
+      );
+    }
+
+    const profitPayload = includeProfitIntent
+      ? {
+          propertyId: validatePropertyId(req.body.propertyId),
+          profitDistributorAddress: normalizeAddress(
+            req.body.profitDistributorAddress?.toString(),
+            'profitDistributorAddress'
+          ),
+          usdcAmountBaseUnits: parseBaseUnits(req.body.usdcAmountBaseUnits, 'usdcAmountBaseUnits'),
+        }
+      : null;
+
+    const platformPayload = includePlatformFeeIntent
+      ? (() => {
+          const platformFeeBps = parseFeeBps(req.body.platformFeeBps, 'platformFeeBps');
+          const recipientRaw = req.body.platformFeeRecipient ?? req.body.feeRecipient;
+          const platformFeeRecipient =
+            platformFeeBps === 0
+              ? null
+              : normalizeAddress(recipientRaw?.toString(), 'platformFeeRecipient');
+          return {
+            campaignAddress: normalizeAddress(
+              req.body.campaignAddress?.toString(),
+              'campaignAddress'
+            ),
+            platformFeeBps,
+            platformFeeRecipient,
+          };
+        })()
+      : null;
+
+    const result = await sequelize.transaction(async (tx) => {
+      let profitIntent: Record<string, unknown> | null = null;
+      let platformFeeIntent: Record<string, unknown> | null = null;
+
+      if (profitPayload) {
+        const [profitRows] = await sequelize.query(
+          `
+          INSERT INTO profit_distribution_intents (
+            id,
+            chain_id,
+            property_id,
+            profit_distributor_address,
+            usdc_amount_base_units,
+            created_by_address
+          )
+          VALUES (
+            :id,
+            :chainId,
+            :propertyId,
+            :profitDistributorAddress,
+            :usdcAmountBaseUnits,
+            :createdByAddress
+          )
+          RETURNING
+            id,
+            chain_id AS "chainId",
+            property_id AS "propertyId",
+            LOWER(profit_distributor_address) AS "profitDistributorAddress",
+            usdc_amount_base_units::text AS "usdcAmountBaseUnits",
+            status,
+            tx_hash AS "txHash",
+            error_message AS "errorMessage",
+            attempt_count AS "attemptCount",
+            submitted_at AS "submittedAt",
+            confirmed_at AS "confirmedAt",
+            created_at AS "createdAt",
+            updated_at AS "updatedAt"
+          `,
+          {
+            replacements: {
+              id: randomUUID(),
+              chainId,
+              propertyId: profitPayload.propertyId,
+              profitDistributorAddress: profitPayload.profitDistributorAddress,
+              usdcAmountBaseUnits: profitPayload.usdcAmountBaseUnits,
+              createdByAddress: adminAddress,
+            },
+            transaction: tx,
+          }
+        );
+        profitIntent = Array.isArray(profitRows) ? (profitRows[0] as Record<string, unknown>) : null;
+      }
+
+      if (platformPayload) {
+        const [platformRows] = await sequelize.query(
+          `
+          INSERT INTO platform_fee_intents (
+            id,
+            chain_id,
+            campaign_address,
+            platform_fee_bps,
+            platform_fee_recipient,
+            created_by_address
+          )
+          VALUES (
+            :id,
+            :chainId,
+            :campaignAddress,
+            :platformFeeBps,
+            :platformFeeRecipient,
+            :createdByAddress
+          )
+          RETURNING
+            id,
+            chain_id AS "chainId",
+            LOWER(campaign_address) AS "campaignAddress",
+            platform_fee_bps AS "platformFeeBps",
+            LOWER(platform_fee_recipient) AS "platformFeeRecipient",
+            status,
+            tx_hash AS "txHash",
+            error_message AS "errorMessage",
+            attempt_count AS "attemptCount",
+            submitted_at AS "submittedAt",
+            confirmed_at AS "confirmedAt",
+            created_at AS "createdAt",
+            updated_at AS "updatedAt"
+          `,
+          {
+            replacements: {
+              id: randomUUID(),
+              chainId,
+              campaignAddress: platformPayload.campaignAddress,
+              platformFeeBps: platformPayload.platformFeeBps,
+              platformFeeRecipient: platformPayload.platformFeeRecipient,
+              createdByAddress: adminAddress,
+            },
+            transaction: tx,
+          }
+        );
+        platformFeeIntent = Array.isArray(platformRows)
+          ? (platformRows[0] as Record<string, unknown>)
+          : null;
+      }
+
+      return { profitIntent, platformFeeIntent };
+    });
+
+    return res.status(201).json(result);
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
 export const listPropertyIntents = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const adminAddress = requireAdminAddress(req);
@@ -329,7 +789,17 @@ export const listPropertyIntents = async (req: AuthenticatedRequest, res: Respon
         name,
         location,
         description,
+        image_url AS "imageUrl",
+        gallery_image_urls AS "imageUrls",
+        youtube_embed_url AS "youtubeEmbedUrl",
         target_usdc_base_units::text AS "targetUsdcBaseUnits",
+        estimated_sell_usdc_base_units::text AS "estimatedSellUsdcBaseUnits",
+        conservative_sell_usdc_base_units::text AS "conservativeSellUsdcBaseUnits",
+        base_sell_usdc_base_units::text AS "baseSellUsdcBaseUnits",
+        optimistic_sell_usdc_base_units::text AS "optimisticSellUsdcBaseUnits",
+        conservative_multiplier_bps AS "conservativeMultiplierBps",
+        base_multiplier_bps AS "baseMultiplierBps",
+        optimistic_multiplier_bps AS "optimisticMultiplierBps",
         start_time AS "startTime",
         end_time AS "endTime",
         LOWER(crowdfund_contract_address) AS "crowdfundAddress",
@@ -448,6 +918,99 @@ export const listPlatformFeeIntents = async (req: AuthenticatedRequest, res: Res
   }
 };
 
+export const retryAdminIntent = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const adminAddress = requireAdminAddress(req);
+    const intentType = parseIntentTable(req.params.intentType);
+    const intentId = req.params.intentId?.toString().trim();
+    if (!intentId) {
+      throw new ValidationError('Missing intentId');
+    }
+    const table = getIntentTableName(intentType);
+
+    const [rows] = await sequelize.query(
+      `
+      UPDATE ${table}
+      SET status = 'pending',
+          tx_hash = NULL,
+          error_message = NULL,
+          submitted_at = NULL,
+          confirmed_at = NULL,
+          updated_at = NOW()
+      WHERE id = :id
+        AND created_by_address = :createdByAddress
+        AND status = 'failed'
+      RETURNING
+        id,
+        status,
+        attempt_count AS "attemptCount",
+        updated_at AS "updatedAt"
+      `,
+      {
+        replacements: {
+          id: intentId,
+          createdByAddress: adminAddress,
+        },
+      }
+    );
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return sendError(res, 404, 'Failed intent not found for this owner', 'not_found');
+    }
+
+    return res.json({ intentType, intent: rows[0] });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
+export const resetAdminIntent = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const adminAddress = requireAdminAddress(req);
+    const intentType = parseIntentTable(req.params.intentType);
+    const intentId = req.params.intentId?.toString().trim();
+    if (!intentId) {
+      throw new ValidationError('Missing intentId');
+    }
+    const table = getIntentTableName(intentType);
+
+    const [rows] = await sequelize.query(
+      `
+      UPDATE ${table}
+      SET status = 'pending',
+          tx_hash = NULL,
+          error_message = NULL,
+          submitted_at = NULL,
+          confirmed_at = NULL,
+          attempt_count = 0,
+          updated_at = NOW()
+      WHERE id = :id
+        AND created_by_address = :createdByAddress
+        AND status <> 'confirmed'
+      RETURNING
+        id,
+        status,
+        attempt_count AS "attemptCount",
+        updated_at AS "updatedAt"
+      `,
+      {
+        replacements: {
+          id: intentId,
+          createdByAddress: adminAddress,
+        },
+      }
+    );
+
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return sendError(res, 404, 'Non-confirmed intent not found for this owner', 'not_found');
+    }
+
+    return res.json({ intentType, intent: rows[0] });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
 export const getProfitPreflight = async (req: AuthenticatedRequest, res: Response) => {
   try {
     requireAdminAddress(req);
@@ -486,7 +1049,7 @@ export const getProfitPreflight = async (req: AuthenticatedRequest, res: Respons
     }
 
     const provider = new JsonRpcProvider(rpcUrl);
-    const operatorAddress = getOperatorAddress();
+    const operatorAddress = getPlatformOperatorAddress();
 
     const ownerData = profitReadInterface.encodeFunctionData('owner', []);
     const ownerRaw = await provider.call({ to: property.profitDistributorAddress, data: ownerData });
@@ -573,6 +1136,150 @@ export const getProfitPreflight = async (req: AuthenticatedRequest, res: Respons
       observability: {
         indexerLastBlock,
         staleSubmittedIntents,
+      },
+    });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
+export const approveProfitAllowance = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    requireAdminAddress(req);
+    const chainId = validateChainId(req.body.chainId ?? BASE_SEPOLIA_CHAIN_ID);
+    const propertyId = validatePropertyId(req.body.propertyId?.toString() || '');
+    const modeRaw = req.body.mode?.toString().toLowerCase();
+    const mode: 'exact' | 'max' = modeRaw === 'exact' ? 'exact' : 'max';
+    const requiredBaseUnits = parseBaseUnits(
+      req.body.usdcAmountBaseUnits ?? '0',
+      'usdcAmountBaseUnits'
+    );
+
+    const propertyRows = await sequelize.query<{
+      propertyId: string;
+      profitDistributorAddress: string;
+    }>(
+      `
+      SELECT
+        property_id AS "propertyId",
+        LOWER(profit_distributor_address) AS "profitDistributorAddress"
+      FROM properties
+      WHERE chain_id = :chainId
+        AND property_id = :propertyId
+      LIMIT 1
+      `,
+      {
+        type: QueryTypes.SELECT,
+        replacements: { chainId, propertyId },
+      }
+    );
+    const property = propertyRows[0] ?? null;
+    if (!property?.profitDistributorAddress) {
+      return sendError(res, 404, 'Property or profit distributor not found', 'not_found');
+    }
+
+    const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL || process.env.BASE_MAINNET_RPC_URL || '';
+    if (!rpcUrl) {
+      return sendError(res, 503, 'BASE_SEPOLIA_RPC_URL is not configured', 'service_unavailable');
+    }
+    const operatorPrivateKey = getOperatorPrivateKey();
+    if (!operatorPrivateKey) {
+      return sendError(res, 503, 'Operator wallet is not configured', 'service_unavailable');
+    }
+
+    const provider = new JsonRpcProvider(rpcUrl);
+    const signer = new Wallet(operatorPrivateKey, provider);
+    const operatorAddress = signer.address.toLowerCase();
+
+    const ownerData = profitReadInterface.encodeFunctionData('owner', []);
+    const ownerRaw = await provider.call({ to: property.profitDistributorAddress, data: ownerData });
+    const [distributorOwner] = profitReadInterface.decodeFunctionResult('owner', ownerRaw);
+    const normalizedDistributorOwner = String(distributorOwner).toLowerCase();
+    if (normalizedDistributorOwner !== operatorAddress) {
+      return sendError(
+        res,
+        409,
+        'Operator wallet does not own this profit distributor',
+        'bad_request'
+      );
+    }
+
+    const usdcData = profitReadInterface.encodeFunctionData('usdcToken', []);
+    const usdcRaw = await provider.call({ to: property.profitDistributorAddress, data: usdcData });
+    const [usdcTokenAddress] = profitReadInterface.decodeFunctionResult('usdcToken', usdcRaw);
+    const normalizedUsdcTokenAddress = String(usdcTokenAddress).toLowerCase();
+
+    const allowanceData = erc20ReadInterface.encodeFunctionData('allowance', [
+      operatorAddress,
+      property.profitDistributorAddress,
+    ]);
+    const allowanceBeforeRaw = await provider.call({
+      to: normalizedUsdcTokenAddress,
+      data: allowanceData,
+    });
+    const [allowanceBefore] = erc20ReadInterface.decodeFunctionResult(
+      'allowance',
+      allowanceBeforeRaw
+    );
+
+    const required = BigInt(requiredBaseUnits);
+    const approveAmount = mode === 'exact' ? required : MaxUint256;
+    let approveTxHash: string | null = null;
+    let resetTxHash: string | null = null;
+    let usedResetFlow = false;
+
+    if (required === 0n || allowanceBefore < required) {
+      const usdc = new Contract(normalizedUsdcTokenAddress, erc20WriteAbi, signer);
+      try {
+        const approveTx = await usdc.approve(property.profitDistributorAddress, approveAmount);
+        const receipt = await approveTx.wait();
+        approveTxHash = approveTx.hash;
+        if (!receipt || receipt.status !== 1) {
+          throw new Error('approve transaction failed');
+        }
+      } catch (_approveError) {
+        usedResetFlow = true;
+        const resetTx = await usdc.approve(property.profitDistributorAddress, 0n);
+        const resetReceipt = await resetTx.wait();
+        resetTxHash = resetTx.hash;
+        if (!resetReceipt || resetReceipt.status !== 1) {
+          throw new Error('allowance reset transaction failed');
+        }
+        const approveTx = await usdc.approve(property.profitDistributorAddress, approveAmount);
+        const approveReceipt = await approveTx.wait();
+        approveTxHash = approveTx.hash;
+        if (!approveReceipt || approveReceipt.status !== 1) {
+          throw new Error('approve transaction failed after reset');
+        }
+      }
+    }
+
+    const allowanceAfterRaw = await provider.call({
+      to: normalizedUsdcTokenAddress,
+      data: allowanceData,
+    });
+    const [allowanceAfter] = erc20ReadInterface.decodeFunctionResult(
+      'allowance',
+      allowanceAfterRaw
+    );
+
+    return res.json({
+      propertyId,
+      chainId,
+      profitDistributorAddress: property.profitDistributorAddress,
+      usdcTokenAddress: normalizedUsdcTokenAddress,
+      operatorAddress,
+      mode,
+      requiredUsdcAmountBaseUnits: required.toString(),
+      approvedUsdcAmountBaseUnits: approveAmount.toString(),
+      allowanceBeforeBaseUnits: allowanceBefore.toString(),
+      allowanceAfterBaseUnits: allowanceAfter.toString(),
+      txHash: approveTxHash,
+      resetTxHash,
+      usedResetFlow,
+      checks: {
+        ownerMatchesOperator: normalizedDistributorOwner === operatorAddress,
+        hasSufficientAllowance: allowanceAfter >= required,
       },
     });
   } catch (error) {
@@ -671,6 +1378,234 @@ export const getProfitFlowStatus = async (req: AuthenticatedRequest, res: Respon
       latestIntent,
       latestDeposit,
       unclaimedPoolBaseUnits: unclaimedBaseUnits.toString(),
+    });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
+export const getPlatformFeePreflight = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    requireAdminAddress(req);
+    const campaignAddressRaw = req.query.campaignAddress?.toString();
+    if (!campaignAddressRaw) {
+      throw new ValidationError('Missing campaignAddress');
+    }
+    const campaignAddress = normalizeAddress(campaignAddressRaw, 'campaignAddress');
+    const requestedFeeBps = parseFeeBps(req.query.platformFeeBps ?? 0, 'platformFeeBps');
+    const recipientRaw = req.query.platformFeeRecipient?.toString();
+    const requestedRecipient =
+      requestedFeeBps === 0
+        ? '0x0000000000000000000000000000000000000000'
+        : (() => {
+            if (!recipientRaw) {
+              throw new ValidationError('Missing platformFeeRecipient');
+            }
+            return normalizeAddress(recipientRaw, 'platformFeeRecipient');
+          })();
+
+    const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL || process.env.BASE_MAINNET_RPC_URL || '';
+    if (!rpcUrl) {
+      return sendError(res, 503, 'BASE_SEPOLIA_RPC_URL is not configured', 'service_unavailable');
+    }
+    const provider = new JsonRpcProvider(rpcUrl);
+    const operatorAddress = getPlatformOperatorAddress();
+
+    const ownerData = crowdfundReadInterface.encodeFunctionData('owner', []);
+    const ownerRaw = await provider.call({ to: campaignAddress, data: ownerData });
+    const [contractOwner] = crowdfundReadInterface.decodeFunctionResult('owner', ownerRaw);
+    const normalizedContractOwner = String(contractOwner).toLowerCase();
+
+    const feeBpsData = crowdfundReadInterface.encodeFunctionData('platformFeeBps', []);
+    const feeBpsRaw = await provider.call({ to: campaignAddress, data: feeBpsData });
+    const [currentFeeBpsRaw] = crowdfundReadInterface.decodeFunctionResult(
+      'platformFeeBps',
+      feeBpsRaw
+    );
+    const currentFeeBps = Number(currentFeeBpsRaw);
+
+    const feeRecipientData = crowdfundReadInterface.encodeFunctionData('platformFeeRecipient', []);
+    const feeRecipientRaw = await provider.call({ to: campaignAddress, data: feeRecipientData });
+    const [currentRecipientRaw] = crowdfundReadInterface.decodeFunctionResult(
+      'platformFeeRecipient',
+      feeRecipientRaw
+    );
+    const currentRecipient = String(currentRecipientRaw).toLowerCase();
+
+    const ownerMatchesOperator =
+      operatorAddress !== null && normalizedContractOwner === operatorAddress;
+    const recipientValid =
+      requestedFeeBps === 0 ||
+      requestedRecipient !== '0x0000000000000000000000000000000000000000';
+    const alreadyApplied =
+      currentFeeBps === requestedFeeBps &&
+      currentRecipient.toLowerCase() === requestedRecipient.toLowerCase();
+
+    const stateRows = await sequelize.query<{ last_block: string }>(
+      'SELECT last_block::text AS last_block FROM indexer_state WHERE chain_id = :chainId LIMIT 1',
+      {
+        type: QueryTypes.SELECT,
+        replacements: { chainId: BASE_SEPOLIA_CHAIN_ID },
+      }
+    );
+    const indexerLastBlock = stateRows[0] ? Number(stateRows[0].last_block) : 0;
+
+    const staleMinutes = 5;
+    const staleRows = await sequelize.query<{ count: string }>(
+      `
+      SELECT COUNT(*)::text AS count
+      FROM (
+        SELECT id, submitted_at FROM property_intents WHERE status = 'submitted'
+        UNION ALL
+        SELECT id, submitted_at FROM profit_distribution_intents WHERE status = 'submitted'
+        UNION ALL
+        SELECT id, submitted_at FROM platform_fee_intents WHERE status = 'submitted'
+      ) AS intents
+      WHERE submitted_at IS NOT NULL
+        AND submitted_at < NOW() - (:staleMinutes::text || ' minutes')::interval
+      `,
+      {
+        type: QueryTypes.SELECT,
+        replacements: { staleMinutes },
+      }
+    );
+    const staleSubmittedIntents = Number(staleRows[0] ? staleRows[0].count : '0');
+
+    return res.json({
+      campaignAddress,
+      chainId: BASE_SEPOLIA_CHAIN_ID,
+      operatorAddress,
+      contractOwner: normalizedContractOwner,
+      requested: {
+        platformFeeBps: requestedFeeBps,
+        platformFeeRecipient: requestedRecipient,
+      },
+      current: {
+        platformFeeBps: currentFeeBps,
+        platformFeeRecipient: currentRecipient,
+      },
+      checks: {
+        operatorConfigured: Boolean(operatorAddress),
+        ownerMatchesOperator,
+        recipientValid,
+        alreadyApplied,
+        indexerHealthy: indexerLastBlock > 0,
+        workersHealthy: staleSubmittedIntents === 0,
+      },
+      observability: {
+        indexerLastBlock,
+        staleSubmittedIntents,
+      },
+    });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
+export const getPlatformFeeFlowStatus = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    requireAdminAddress(req);
+    const campaignAddressRaw = req.query.campaignAddress?.toString();
+    if (!campaignAddressRaw) {
+      throw new ValidationError('Missing campaignAddress');
+    }
+    const campaignAddress = normalizeAddress(campaignAddressRaw, 'campaignAddress');
+    const requestedFeeBps =
+      req.query.platformFeeBps !== undefined
+        ? parseFeeBps(req.query.platformFeeBps, 'platformFeeBps')
+        : null;
+    const requestedRecipientRaw = req.query.platformFeeRecipient?.toString();
+    const requestedRecipient =
+      requestedFeeBps === null
+        ? null
+        : requestedFeeBps === 0
+          ? '0x0000000000000000000000000000000000000000'
+          : (() => {
+              if (!requestedRecipientRaw) {
+                throw new ValidationError('Missing platformFeeRecipient');
+              }
+              return normalizeAddress(requestedRecipientRaw, 'platformFeeRecipient');
+            })();
+
+    const latestIntentRows = await sequelize.query<{
+      id: string;
+      status: string;
+      submittedAt: string | null;
+      confirmedAt: string | null;
+      txHash: string | null;
+      platformFeeBps: number;
+      platformFeeRecipient: string | null;
+      createdAt: string;
+    }>(
+      `
+      SELECT
+        id,
+        status,
+        submitted_at AS "submittedAt",
+        confirmed_at AS "confirmedAt",
+        tx_hash AS "txHash",
+        platform_fee_bps AS "platformFeeBps",
+        LOWER(platform_fee_recipient) AS "platformFeeRecipient",
+        created_at AS "createdAt"
+      FROM platform_fee_intents
+      WHERE LOWER(campaign_address) = :campaignAddress
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      {
+        type: QueryTypes.SELECT,
+        replacements: { campaignAddress: campaignAddress.toLowerCase() },
+      }
+    );
+
+    const campaignRows = await sequelize.query<{
+      platformFeeBps: number | null;
+      platformFeeRecipient: string | null;
+      updatedAt: string;
+    }>(
+      `
+      SELECT
+        platform_fee_bps AS "platformFeeBps",
+        LOWER(platform_fee_recipient) AS "platformFeeRecipient",
+        updated_at AS "updatedAt"
+      FROM campaigns
+      WHERE LOWER(campaign_address) = :campaignAddress
+      ORDER BY updated_at DESC
+      LIMIT 1
+      `,
+      {
+        type: QueryTypes.SELECT,
+        replacements: { campaignAddress: campaignAddress.toLowerCase() },
+      }
+    );
+
+    const latestIntent = latestIntentRows[0] ?? null;
+    const currentCampaign = campaignRows[0] ?? null;
+
+    const targetBps =
+      requestedFeeBps ?? (latestIntent ? Number(latestIntent.platformFeeBps) : null);
+    const targetRecipient =
+      requestedRecipient ??
+      (latestIntent ? latestIntent.platformFeeRecipient?.toLowerCase() ?? null : null);
+    const campaignMatchesTarget =
+      targetBps !== null &&
+      currentCampaign !== null &&
+      currentCampaign.platformFeeBps === targetBps &&
+      (currentCampaign.platformFeeRecipient ?? '').toLowerCase() === (targetRecipient ?? '');
+
+    return res.json({
+      campaignAddress,
+      flags: {
+        intentSubmitted: Boolean(latestIntent),
+        intentConfirmed: latestIntent?.status === 'confirmed',
+        campaignMatchesTarget,
+      },
+      latestIntent,
+      currentCampaign,
+      target: {
+        platformFeeBps: targetBps,
+        platformFeeRecipient: targetRecipient,
+      },
     });
   } catch (error) {
     return handleError(res, error);

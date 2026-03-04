@@ -117,6 +117,7 @@ export default function PropertyDetail() {
   const [positionLoading, setPositionLoading] = useState(false);
   const [positionError, setPositionError] = useState('');
   const [nowMs, setNowMs] = useState(Date.now());
+  const [selectedGalleryImage, setSelectedGalleryImage] = useState<string | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -231,6 +232,101 @@ export default function PropertyDetail() {
       claimableProfitBaseUnits !== null ? Number(formatUnits(claimableProfitBaseUnits, 6)) : null;
     return { invested, claimableProfit };
   }, [claimableProfitBaseUnits, myInvestedBaseUnits]);
+  const targetRaiseUsdc = useMemo(
+    () => Number(formatUnits(BigInt(property?.targetUsdcBaseUnits ?? '0'), 6)),
+    [property?.targetUsdcBaseUnits]
+  );
+  const estimatedSellUsdc = useMemo(
+    () =>
+      property?.estimatedSellUsdcBaseUnits
+        ? Number(formatUnits(BigInt(property.estimatedSellUsdcBaseUnits), 6))
+        : null,
+    [property?.estimatedSellUsdcBaseUnits]
+  );
+  const projectedRoiPercent = useMemo(() => {
+    if (!estimatedSellUsdc || targetRaiseUsdc <= 0) return null;
+    return ((estimatedSellUsdc - targetRaiseUsdc) / targetRaiseUsdc) * 100;
+  }, [estimatedSellUsdc, targetRaiseUsdc]);
+  const myProjectedExitValueUsdc = useMemo(() => {
+    if (!estimatedSellUsdc || targetRaiseUsdc <= 0 || positionSummary.invested <= 0) return null;
+    return (positionSummary.invested / targetRaiseUsdc) * estimatedSellUsdc;
+  }, [estimatedSellUsdc, targetRaiseUsdc, positionSummary.invested]);
+  const myProjectedProfitUsdc = useMemo(() => {
+    if (myProjectedExitValueUsdc === null) return null;
+    return myProjectedExitValueUsdc - positionSummary.invested;
+  }, [myProjectedExitValueUsdc, positionSummary.invested]);
+  const scenarioProjections = useMemo(() => {
+    if (targetRaiseUsdc <= 0) {
+      return null;
+    }
+    const fallbackBase = estimatedSellUsdc ?? targetRaiseUsdc;
+    const resolveScenario = (
+      fixedBaseUnits: string | null | undefined,
+      multiplierBps: number | null | undefined,
+      defaultMultiplierBps: number
+    ) => {
+      const fixed = fixedBaseUnits ? Number(formatUnits(BigInt(fixedBaseUnits), 6)) : null;
+      if (fixed && Number.isFinite(fixed) && fixed > 0) {
+        return fixed;
+      }
+      const multiplier = multiplierBps && multiplierBps > 0 ? multiplierBps : defaultMultiplierBps;
+      return (fallbackBase * multiplier) / 10000;
+    };
+
+    const conservative = resolveScenario(
+      property?.conservativeSellUsdcBaseUnits,
+      property?.conservativeMultiplierBps,
+      8500
+    );
+    const base = resolveScenario(
+      property?.baseSellUsdcBaseUnits,
+      property?.baseMultiplierBps,
+      10000
+    );
+    const optimistic = resolveScenario(
+      property?.optimisticSellUsdcBaseUnits,
+      property?.optimisticMultiplierBps,
+      12500
+    );
+
+    const toRoi = (value: number) => ((value - targetRaiseUsdc) / targetRaiseUsdc) * 100;
+    const toMyExit = (value: number) =>
+      positionSummary.invested > 0 ? (positionSummary.invested / targetRaiseUsdc) * value : null;
+
+    return {
+      conservative: {
+        sell: conservative,
+        roi: toRoi(conservative),
+        myExit: toMyExit(conservative),
+      },
+      base: {
+        sell: base,
+        roi: toRoi(base),
+        myExit: toMyExit(base),
+      },
+      optimistic: {
+        sell: optimistic,
+        roi: toRoi(optimistic),
+        myExit: toMyExit(optimistic),
+      },
+    };
+  }, [
+    estimatedSellUsdc,
+    property?.baseMultiplierBps,
+    property?.baseSellUsdcBaseUnits,
+    property?.conservativeMultiplierBps,
+    property?.conservativeSellUsdcBaseUnits,
+    property?.optimisticMultiplierBps,
+    property?.optimisticSellUsdcBaseUnits,
+    positionSummary.invested,
+    targetRaiseUsdc,
+  ]);
+  const galleryImages = useMemo(() => {
+    const merged = [property?.imageUrl, ...(property?.imageUrls ?? [])]
+      .map((value) => value?.trim())
+      .filter((value): value is string => Boolean(value));
+    return Array.from(new Set(merged));
+  }, [property?.imageUrl, property?.imageUrls]);
 
   const campaignPhaseBadge = useMemo(() => {
     if (campaignPhase === 'ACTIVE') {
@@ -327,6 +423,10 @@ export default function PropertyDetail() {
     const timer = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    setSelectedGalleryImage(galleryImages[0] ?? null);
+  }, [galleryImages]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1018,315 +1118,458 @@ export default function PropertyDetail() {
   }
 
   return (
-    <div className="container mx-auto px-4 py-8">
-      <h1 className="text-3xl font-bold mb-8 text-gray-900 dark:text-white">
-        {property.name}
-      </h1>
-
-      <div className="grid md:grid-cols-2 gap-8">
-        <div className="bg-gray-300 dark:bg-gray-700 h-96 rounded-lg" />
-
-        <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-lg">
-          <h2 className="text-2xl font-bold mb-4 text-gray-900 dark:text-white">
-            Property Information
-          </h2>
-          <div className="space-y-4">
-            <div>
-              <label className="text-sm text-gray-500 dark:text-gray-400">Location</label>
-              <p className="text-gray-900 dark:text-white">{property.location}</p>
-            </div>
-            <div>
-              <label className="text-sm text-gray-500 dark:text-gray-400">Description</label>
-              <p className="text-gray-900 dark:text-white">{property.description}</p>
-            </div>
-            <div>
-              <label className="text-sm text-gray-500 dark:text-gray-400">Target Raise</label>
-              <p className="text-gray-900 dark:text-white">${toUsd(property.targetUsdcBaseUnits)} USDC</p>
-            </div>
-            <div>
-              <label className="text-sm text-gray-500 dark:text-gray-400">Platform Fee</label>
-              <p className="text-gray-900 dark:text-white">
-                {property.platformFeeBps === null
-                  ? 'Not configured'
-                  : `${(property.platformFeeBps / 100).toFixed(2)}%`}
-              </p>
-            </div>
-            <div>
-              <label className="text-sm text-gray-500 dark:text-gray-400">Campaign State</label>
-              <div className="mt-1 flex items-center gap-2">
-                <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${campaignPhaseBadge}`}>
-                  {campaignPhase}
-                </span>
-                <span className="text-xs text-gray-500 dark:text-gray-400">
-                  Raw: {campaign?.state ?? 'Unknown'}
-                </span>
-              </div>
-            </div>
-            {campaign?.startTime && (
-              <div>
-                <label className="text-sm text-gray-500 dark:text-gray-400">Campaign Start Time</label>
-                <p className="text-gray-900 dark:text-white">
-                  {new Date(campaign.startTime).toLocaleString()}
-                </p>
-              </div>
+    <div className="bg-gradient-to-br from-slate-50 via-white to-slate-100 py-10 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
+      <div className="container mx-auto px-4">
+        <div className="mb-7 rounded-2xl border border-white/70 bg-white/80 p-6 shadow-xl shadow-slate-200/40 backdrop-blur dark:border-white/10 dark:bg-slate-900/70 dark:shadow-black/40">
+          <h1 className="text-3xl font-semibold tracking-tight text-slate-900 dark:text-white">
+            {property.name}
+          </h1>
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${campaignPhaseBadge}`}>
+              {campaignPhase}
+            </span>
+            <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
+              {property.location}
+            </span>
+            <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
+              Target ${toUsd(property.targetUsdcBaseUnits)} USDC
+            </span>
+            <span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
+              Est. Sell{' '}
+              {property.estimatedSellUsdcBaseUnits
+                ? `$${toUsd(property.estimatedSellUsdcBaseUnits)} USDC`
+                : 'Not set'}
+            </span>
+            {projectedRoiPercent !== null && (
+              <span className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-200">
+                Projected ROI {projectedRoiPercent.toLocaleString(undefined, { maximumFractionDigits: 2 })}%
+              </span>
             )}
-            {isConnected && connectedAddress && (
-              <div className="rounded-lg border border-gray-200 px-4 py-3 text-sm dark:border-gray-700">
-                <p className="text-gray-600 dark:text-gray-300">
-                  My invested: <span className="font-semibold text-gray-900 dark:text-white">
-                    {positionSummary.invested.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC
-                  </span>
-                </p>
-                <p className="mt-1 text-gray-600 dark:text-gray-300">
-                  My claimable profit:{' '}
-                  <span className="font-semibold text-gray-900 dark:text-white">
-                    {positionSummary.claimableProfit === null
-                      ? '--'
-                      : `${positionSummary.claimableProfit.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`}
-                  </span>
-                </p>
-                {positionLoading && (
-                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Refreshing position...</p>
-                )}
-                {positionError && (
-                  <p className="mt-1 text-xs text-red-600 dark:text-red-300">{positionError}</p>
-                )}
-              </div>
-            )}
-            {isConnected && connectedAddress && (
-              <div>
-                <label className="text-sm text-gray-500 dark:text-gray-400">Connected Wallet</label>
-                <p className="font-mono text-xs text-gray-700 dark:text-gray-300 break-all">
-                  {connectedAddress}
-                </p>
-              </div>
-            )}
-            <div>
-              <label className="text-sm text-gray-500 dark:text-gray-400">Crowdfund Contract</label>
-              <p className="font-mono text-xs text-gray-700 dark:text-gray-300 break-all">
-                {property.crowdfundAddress}
-              </p>
-            </div>
-            <div>
-              <label className="text-sm text-gray-500 dark:text-gray-400">Crowdfund USDC Token</label>
-              <p className="font-mono text-xs text-gray-700 dark:text-gray-300 break-all">
-                {effectiveUsdcAddress}
-              </p>
-            </div>
-            {!usesOfficialUsdc && (
-              <div className="rounded-lg bg-amber-50 px-4 py-3 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
-                This property uses a non-standard USDC token address. Investors must hold this exact
-                token to invest, and ETH auto-swap routing may be unavailable.
-              </div>
-            )}
+          </div>
+        </div>
 
-            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 dark:border-amber-800 dark:bg-amber-900/30 dark:text-amber-100">
-              Investing is risky and may result in loss of capital. Review{' '}
-              <Link to="/disclosures" className="underline font-medium">
-                Risk Disclosures
-              </Link>{' '}
-              before transacting.
-            </div>
-
-            <div className="pt-2">
-              <label className="text-sm text-gray-500 dark:text-gray-400">Invest With</label>
-              <select
-                value={investAsset}
-                onChange={(event) => setInvestAsset(event.target.value as 'USDC' | 'ETH')}
-                className="mt-1 w-full rounded-lg border px-4 py-2 dark:bg-gray-700 dark:border-gray-600"
-                disabled={txInFlight}
-              >
-                <option value="USDC">USDC (Direct)</option>
-                <option value="ETH" disabled={!canSwapEthOnBaseSepolia || hasNoUsdcRoute}>
-                  ETH (Auto-swap to USDC)
-                </option>
-              </select>
-            </div>
-
-            {investAsset === 'USDC' ? (
-              <div className="pt-2">
-                <label className="text-sm text-gray-500 dark:text-gray-400">Invest Amount (USDC)</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.000001"
-                  value={amountUsdc}
-                  onChange={(event) => setAmountUsdc(event.target.value)}
-                  placeholder="e.g. 100"
-                  className="mt-1 w-full rounded-lg border px-4 py-2 dark:bg-gray-700 dark:border-gray-600"
-                  disabled={txInFlight}
+        <div className="grid gap-6 lg:grid-cols-12">
+          <div className="space-y-4 lg:col-span-7">
+            <div className="overflow-hidden rounded-2xl border border-white/70 bg-white/80 p-2 shadow-xl shadow-slate-200/30 backdrop-blur dark:border-white/10 dark:bg-slate-900/60 dark:shadow-black/40">
+              {selectedGalleryImage ? (
+                <img
+                  src={selectedGalleryImage}
+                  alt={property.name}
+                  className="h-[420px] w-full rounded-xl object-cover"
+                  loading="lazy"
                 />
-              </div>
-            ) : (
-              <div className="space-y-2 pt-2">
-                <div>
-                  <label className="text-sm text-gray-500 dark:text-gray-400">Invest Amount (ETH)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.000000000000000001"
-                    value={amountEth}
-                    onChange={(event) => setAmountEth(event.target.value)}
-                    placeholder="e.g. 0.1"
-                    className="mt-1 w-full rounded-lg border px-4 py-2 dark:bg-gray-700 dark:border-gray-600"
-                    disabled={txInFlight}
-                  />
-                </div>
-                <div>
-                  <label className="text-sm text-gray-500 dark:text-gray-400">Slippage (%)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    max="50"
-                    step="0.1"
-                    value={slippagePercent}
-                    onChange={(event) => setSlippagePercent(event.target.value)}
-                    placeholder="e.g. 1"
-                    className="mt-1 w-full rounded-lg border px-4 py-2 dark:bg-gray-700 dark:border-gray-600"
-                    disabled={txInFlight}
-                  />
-                </div>
-                <div className="rounded-lg border border-gray-200 px-4 py-3 text-sm dark:border-gray-700">
-                  <p className="text-gray-600 dark:text-gray-300">
-                    Estimated USDC out:{' '}
-                    <span className="font-semibold text-gray-900 dark:text-white">
-                      {isQuotingEth
-                        ? 'Quoting...'
-                        : quotedUsdcOutBaseUnits
-                          ? `${formatUsdcUnits(quotedUsdcOutBaseUnits)} USDC`
-                          : '--'}
-                    </span>
-                  </p>
-                  {quoteSource && (
-                    <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                      Quote source: {quoteSource === 'onchain' ? 'Onchain Quoter' : 'Market fallback'}
-                    </p>
-                  )}
-                  {ethQuote?.feeTier && (
-                    <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                      Quoted fee tier: {ethQuote.feeTier}
-                    </p>
-                  )}
-                  {ethQuote?.amountInWei && (
-                    <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                      Quoted input: {Number(formatUnits(BigInt(ethQuote.amountInWei), 18)).toLocaleString(undefined, {
-                        maximumFractionDigits: 18,
-                      })} ETH
-                    </p>
-                  )}
-                  <p className="mt-1 text-gray-600 dark:text-gray-300">
-                    Auto min USDC out ({slippagePercent || '0'}%):{' '}
-                    <span className="font-semibold text-gray-900 dark:text-white">
-                      {minUsdcOutBaseUnits ? `${formatUsdcUnits(minUsdcOutBaseUnits)} USDC` : '--'}
-                    </span>
-                  </p>
-                  {quotedUsdcOutBaseUnits !== null && normalizedEthAmount > 0 && (
-                    <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                      Implied rate:{' '}
-                      {(
-                        Number(formatUnits(quotedUsdcOutBaseUnits, 6)) / normalizedEthAmount
-                      ).toLocaleString(undefined, { maximumFractionDigits: 2 })}{' '}
-                      USDC/ETH
-                    </p>
-                  )}
-                  {quoteError && (
-                    <p className="mt-2 text-red-600 dark:text-red-300">{quoteError}</p>
-                  )}
-                </div>
-                <p className="text-xs text-gray-500 dark:text-gray-400">
-                  ETH is wrapped and swapped to USDC before investment. You pay gas and swap fees.
-                </p>
-              </div>
-            )}
-
-            {investAsset === 'ETH' && !canSwapEthOnBaseSepolia && (
-              <div className="rounded-lg bg-amber-50 px-4 py-3 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
-                ETH investing is disabled until swap router env vars are configured.
-              </div>
-            )}
-            {investAsset === 'ETH' && hasNoUsdcRoute && (
-              <div className="rounded-lg bg-amber-50 px-4 py-3 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
-                ETH auto-swap is unavailable for this property because no liquid WETH/USDC route
-                exists for the crowdfund token on Base Sepolia. Use direct USDC investment.
-              </div>
-            )}
-
-            {!walletAvailable && (
-              <div className="rounded-lg bg-amber-50 px-4 py-3 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
-                Connect a wallet extension to invest or claim.
-              </div>
-            )}
-            {walletAvailable && !canInvest && (
-              <div className="rounded-lg bg-amber-50 px-4 py-3 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
-                {investUnavailableMessage}
-              </div>
-            )}
-
-            {txError && (
-              <div className="rounded-lg bg-red-50 px-4 py-3 text-red-700 dark:bg-red-900/40 dark:text-red-200">
-                {txError}
-              </div>
-            )}
-            {txStatus && (
-              <div className="rounded-lg bg-green-50 px-4 py-3 text-green-700 dark:bg-green-900/40 dark:text-green-200">
-                {txStatus}
-              </div>
-            )}
-
-            <button
-              className="w-full bg-primary-600 text-white py-3 rounded-lg hover:bg-primary-700 mt-2 disabled:opacity-60 disabled:cursor-not-allowed"
-              onClick={handleInvest}
-              disabled={
-                isInvesting ||
-                !walletAvailable ||
-                txInFlight ||
-                !canInvest ||
-                (investAsset === 'ETH' &&
-                  (isQuotingEth || !quotedUsdcOutBaseUnits || !minUsdcOutBaseUnits))
-              }
-            >
-              {isInvesting
-                ? 'Processing...'
-                : !canInvest
-                  ? campaignPhase === 'NOT_STARTED'
-                    ? 'Campaign Not Started'
-                    : campaignPhase === 'FAILED'
-                      ? 'Campaign Failed'
-                      : campaignPhase === 'ENDED'
-                        ? 'Campaign Ended'
-                        : 'Investment Unavailable'
-                : investAsset === 'ETH'
-                  ? 'Swap ETH and Invest'
-                  : 'Invest Onchain'}
-            </button>
-            <div className="grid grid-cols-1 gap-2 pt-2">
-              <button
-                className="w-full border border-primary-600 text-primary-700 dark:text-primary-300 py-2 rounded-lg disabled:opacity-60 disabled:cursor-not-allowed"
-                onClick={handleClaimEquity}
-                disabled={isClaimingEquity || !walletAvailable || txInFlight}
-              >
-                {isClaimingEquity ? 'Claiming Equity...' : 'Claim Equity Tokens'}
-              </button>
-              <button
-                className="w-full border border-primary-600 text-primary-700 dark:text-primary-300 py-2 rounded-lg disabled:opacity-60 disabled:cursor-not-allowed"
-                onClick={handleClaimProfit}
-                disabled={isClaimingProfit || !walletAvailable || txInFlight}
-              >
-                {isClaimingProfit ? 'Claiming Profit...' : 'Claim Profit (USDC)'}
-              </button>
-              {connectedAddress && claimableProfitBaseUnits !== null && (
-                <div className="text-xs text-gray-500 dark:text-gray-400">
-                  Claimable now: {formatUsdcUnits(claimableProfitBaseUnits)} USDC
+              ) : (
+                <div className="flex h-[420px] items-center justify-center rounded-xl bg-slate-200 text-sm text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                  No image
                 </div>
               )}
+            </div>
+            {galleryImages.length > 1 && (
+              <div className="grid grid-cols-4 gap-2 rounded-2xl border border-white/70 bg-white/80 p-2 shadow-lg shadow-slate-200/30 backdrop-blur dark:border-white/10 dark:bg-slate-900/60 dark:shadow-black/30">
+                {galleryImages.map((imageUrl) => (
+                  <button
+                    key={imageUrl}
+                    type="button"
+                    onClick={() => setSelectedGalleryImage(imageUrl)}
+                    className={`overflow-hidden rounded-lg border transition ${
+                      selectedGalleryImage === imageUrl
+                        ? 'border-primary-600 ring-2 ring-primary-200 dark:ring-primary-700/40'
+                        : 'border-slate-200 dark:border-slate-700'
+                    }`}
+                  >
+                    <img
+                      src={imageUrl}
+                      alt={`${property.name} view`}
+                      className="h-20 w-full object-cover"
+                      loading="lazy"
+                    />
+                  </button>
+                ))}
+              </div>
+            )}
+            {property.youtubeEmbedUrl && (
+              <div className="overflow-hidden rounded-2xl border border-white/70 bg-white/80 p-2 shadow-xl shadow-slate-200/30 backdrop-blur dark:border-white/10 dark:bg-slate-900/60 dark:shadow-black/40">
+                <iframe
+                  title={`${property.name} video`}
+                  src={property.youtubeEmbedUrl}
+                  className="h-72 w-full rounded-xl"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowFullScreen
+                />
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-4 lg:col-span-5 lg:sticky lg:top-24 lg:self-start">
+            <div className="rounded-2xl border border-white/70 bg-white/90 p-6 shadow-xl shadow-slate-200/40 backdrop-blur dark:border-white/10 dark:bg-slate-900/75 dark:shadow-black/40">
+              <h2 className="mb-4 text-xl font-semibold text-slate-900 dark:text-white">
+                Invest & Manage
+              </h2>
+
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div className="rounded-lg bg-slate-100 px-3 py-2 dark:bg-slate-800">
+                  <p className="text-slate-500 dark:text-slate-400">Platform Fee</p>
+                  <p className="font-semibold text-slate-900 dark:text-white">
+                    {property.platformFeeBps === null
+                      ? 'Not set'
+                      : `${(property.platformFeeBps / 100).toFixed(2)}%`}
+                  </p>
+                </div>
+                <div className="rounded-lg bg-slate-100 px-3 py-2 dark:bg-slate-800">
+                  <p className="text-slate-500 dark:text-slate-400">Campaign Start</p>
+                  <p className="font-semibold text-slate-900 dark:text-white">
+                    {campaign?.startTime ? new Date(campaign.startTime).toLocaleDateString() : '--'}
+                  </p>
+                </div>
+                <div className="rounded-lg bg-slate-100 px-3 py-2 dark:bg-slate-800">
+                  <p className="text-slate-500 dark:text-slate-400">Est. Sell Price</p>
+                  <p className="font-semibold text-slate-900 dark:text-white">
+                    {estimatedSellUsdc !== null
+                      ? `$${estimatedSellUsdc.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+                      : 'Not set'}
+                  </p>
+                </div>
+                <div className="rounded-lg bg-slate-100 px-3 py-2 dark:bg-slate-800">
+                  <p className="text-slate-500 dark:text-slate-400">Projected ROI</p>
+                  <p className="font-semibold text-slate-900 dark:text-white">
+                    {projectedRoiPercent !== null
+                      ? `${projectedRoiPercent.toLocaleString(undefined, { maximumFractionDigits: 2 })}%`
+                      : '--'}
+                  </p>
+                </div>
+              </div>
+              {scenarioProjections && (
+                <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs dark:border-slate-700 dark:bg-slate-800/60">
+                  <p className="mb-2 font-semibold text-slate-900 dark:text-white">Return Scenarios</p>
+                  <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                    <div>
+                      <p className="text-slate-500 dark:text-slate-400">Conservative</p>
+                      <p className="text-slate-900 dark:text-white">
+                        ${scenarioProjections.conservative.sell.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                      </p>
+                      <p className="text-slate-500 dark:text-slate-400">
+                        ROI {scenarioProjections.conservative.roi.toLocaleString(undefined, { maximumFractionDigits: 2 })}%
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500 dark:text-slate-400">Base</p>
+                      <p className="text-slate-900 dark:text-white">
+                        ${scenarioProjections.base.sell.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                      </p>
+                      <p className="text-slate-500 dark:text-slate-400">
+                        ROI {scenarioProjections.base.roi.toLocaleString(undefined, { maximumFractionDigits: 2 })}%
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-500 dark:text-slate-400">Optimistic</p>
+                      <p className="text-slate-900 dark:text-white">
+                        ${scenarioProjections.optimistic.sell.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                      </p>
+                      <p className="text-slate-500 dark:text-slate-400">
+                        ROI {scenarioProjections.optimistic.roi.toLocaleString(undefined, { maximumFractionDigits: 2 })}%
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {isConnected && connectedAddress && (
+                <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm dark:border-slate-700 dark:bg-slate-800/70">
+                  <p className="text-slate-600 dark:text-slate-300">
+                    My invested:{' '}
+                    <span className="font-semibold text-slate-900 dark:text-white">
+                      {positionSummary.invested.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC
+                    </span>
+                  </p>
+                  <p className="mt-1 text-slate-600 dark:text-slate-300">
+                    My claimable profit:{' '}
+                    <span className="font-semibold text-slate-900 dark:text-white">
+                      {positionSummary.claimableProfit === null
+                        ? '--'
+                        : `${positionSummary.claimableProfit.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`}
+                    </span>
+                  </p>
+                  {positionLoading && (
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Refreshing position...</p>
+                  )}
+                  {positionError && (
+                    <p className="mt-1 text-xs text-red-600 dark:text-red-300">{positionError}</p>
+                  )}
+                  {myProjectedExitValueUsdc !== null && myProjectedProfitUsdc !== null && (
+                    <p className="mt-1 text-xs text-emerald-700 dark:text-emerald-300">
+                      Projected exit value: $
+                      {myProjectedExitValueUsdc.toLocaleString(undefined, { maximumFractionDigits: 2 })}{' '}
+                      (profit: $
+                      {myProjectedProfitUsdc.toLocaleString(undefined, { maximumFractionDigits: 2 })})
+                    </p>
+                  )}
+                  {scenarioProjections && (
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                      Scenario exits: C $
+                      {(scenarioProjections.conservative.myExit ?? 0).toLocaleString(undefined, {
+                        maximumFractionDigits: 2,
+                      })}
+                      {' '}| B $
+                      {(scenarioProjections.base.myExit ?? 0).toLocaleString(undefined, {
+                        maximumFractionDigits: 2,
+                      })}
+                      {' '}| O $
+                      {(scenarioProjections.optimistic.myExit ?? 0).toLocaleString(undefined, {
+                        maximumFractionDigits: 2,
+                      })}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              <div className="mt-4 space-y-3">
+                <div>
+                  <label className="text-sm text-slate-500 dark:text-slate-400">Invest With</label>
+                  <select
+                    value={investAsset}
+                    onChange={(event) => setInvestAsset(event.target.value as 'USDC' | 'ETH')}
+                    className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-4 py-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-white"
+                    disabled={txInFlight}
+                  >
+                    <option value="USDC">USDC (Direct)</option>
+                    <option value="ETH" disabled={!canSwapEthOnBaseSepolia || hasNoUsdcRoute}>
+                      ETH (Auto-swap to USDC)
+                    </option>
+                  </select>
+                </div>
+
+                {investAsset === 'USDC' ? (
+                  <div>
+                    <label className="text-sm text-slate-500 dark:text-slate-400">Invest Amount (USDC)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.000001"
+                      value={amountUsdc}
+                      onChange={(event) => setAmountUsdc(event.target.value)}
+                      placeholder="e.g. 100"
+                      className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-4 py-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-white"
+                      disabled={txInFlight}
+                    />
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div>
+                      <label className="text-sm text-slate-500 dark:text-slate-400">Invest Amount (ETH)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.000000000000000001"
+                        value={amountEth}
+                        onChange={(event) => setAmountEth(event.target.value)}
+                        placeholder="e.g. 0.1"
+                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-4 py-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-white"
+                        disabled={txInFlight}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm text-slate-500 dark:text-slate-400">Slippage (%)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="50"
+                        step="0.1"
+                        value={slippagePercent}
+                        onChange={(event) => setSlippagePercent(event.target.value)}
+                        placeholder="e.g. 1"
+                        className="mt-1 w-full rounded-xl border border-slate-300 bg-white px-4 py-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-white"
+                        disabled={txInFlight}
+                      />
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm dark:border-slate-700 dark:bg-slate-800/70">
+                      <p className="text-slate-600 dark:text-slate-300">
+                        Estimated USDC out:{' '}
+                        <span className="font-semibold text-slate-900 dark:text-white">
+                          {isQuotingEth
+                            ? 'Quoting...'
+                            : quotedUsdcOutBaseUnits
+                              ? `${formatUsdcUnits(quotedUsdcOutBaseUnits)} USDC`
+                              : '--'}
+                        </span>
+                      </p>
+                      {quoteSource && (
+                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                          Quote source: {quoteSource === 'onchain' ? 'Onchain Quoter' : 'Market fallback'}
+                        </p>
+                      )}
+                      {ethQuote?.feeTier && (
+                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                          Quoted fee tier: {ethQuote.feeTier}
+                        </p>
+                      )}
+                      {ethQuote?.amountInWei && (
+                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                          Quoted input:{' '}
+                          {Number(formatUnits(BigInt(ethQuote.amountInWei), 18)).toLocaleString(undefined, {
+                            maximumFractionDigits: 18,
+                          })}{' '}
+                          ETH
+                        </p>
+                      )}
+                      <p className="mt-1 text-slate-600 dark:text-slate-300">
+                        Auto min USDC out ({slippagePercent || '0'}%):{' '}
+                        <span className="font-semibold text-slate-900 dark:text-white">
+                          {minUsdcOutBaseUnits ? `${formatUsdcUnits(minUsdcOutBaseUnits)} USDC` : '--'}
+                        </span>
+                      </p>
+                      {quotedUsdcOutBaseUnits !== null && normalizedEthAmount > 0 && (
+                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                          Implied rate:{' '}
+                          {(
+                            Number(formatUnits(quotedUsdcOutBaseUnits, 6)) / normalizedEthAmount
+                          ).toLocaleString(undefined, { maximumFractionDigits: 2 })}{' '}
+                          USDC/ETH
+                        </p>
+                      )}
+                      {quoteError && (
+                        <p className="mt-2 text-red-600 dark:text-red-300">{quoteError}</p>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      ETH is wrapped and swapped to USDC before investment. You pay gas and swap fees.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {investAsset === 'ETH' && !canSwapEthOnBaseSepolia && (
+                <div className="mt-3 rounded-xl bg-amber-50 px-4 py-3 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+                  ETH investing is disabled until swap router env vars are configured.
+                </div>
+              )}
+              {investAsset === 'ETH' && hasNoUsdcRoute && (
+                <div className="mt-3 rounded-xl bg-amber-50 px-4 py-3 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+                  ETH auto-swap is unavailable for this property because no liquid WETH/USDC route
+                  exists for the crowdfund token on Base Sepolia. Use direct USDC investment.
+                </div>
+              )}
+
+              {!walletAvailable && (
+                <div className="mt-3 rounded-xl bg-amber-50 px-4 py-3 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+                  Connect a wallet extension to invest or claim.
+                </div>
+              )}
+              {walletAvailable && !canInvest && (
+                <div className="mt-3 rounded-xl bg-amber-50 px-4 py-3 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+                  {investUnavailableMessage}
+                </div>
+              )}
+
+              {txError && (
+                <div className="mt-3 rounded-xl bg-red-50 px-4 py-3 text-red-700 dark:bg-red-900/40 dark:text-red-200">
+                  {txError}
+                </div>
+              )}
+              {txStatus && (
+                <div className="mt-3 rounded-xl bg-green-50 px-4 py-3 text-green-700 dark:bg-green-900/40 dark:text-green-200">
+                  {txStatus}
+                </div>
+              )}
+
               <button
-                className="w-full border border-primary-600 text-primary-700 dark:text-primary-300 py-2 rounded-lg disabled:opacity-60 disabled:cursor-not-allowed"
-                onClick={handleClaimRefund}
-                disabled={isClaimingRefund || !canClaimRefund || !walletAvailable || txInFlight}
-                title={canClaimRefund ? 'Claim refund from failed campaign' : 'Refunds available only when campaign is FAILED'}
+                className="mt-4 w-full rounded-xl bg-primary-600 py-3 text-white transition hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={handleInvest}
+                disabled={
+                  isInvesting ||
+                  !walletAvailable ||
+                  txInFlight ||
+                  !canInvest ||
+                  (investAsset === 'ETH' &&
+                    (isQuotingEth || !quotedUsdcOutBaseUnits || !minUsdcOutBaseUnits))
+                }
               >
-                {isClaimingRefund ? 'Claiming Refund...' : canClaimRefund ? 'Claim Refund' : 'Refund Unavailable'}
+                {isInvesting
+                  ? 'Processing...'
+                  : !canInvest
+                    ? campaignPhase === 'NOT_STARTED'
+                      ? 'Campaign Not Started'
+                      : campaignPhase === 'FAILED'
+                        ? 'Campaign Failed'
+                        : campaignPhase === 'ENDED'
+                          ? 'Campaign Ended'
+                          : 'Investment Unavailable'
+                    : investAsset === 'ETH'
+                      ? 'Swap ETH and Invest'
+                      : 'Invest Onchain'}
               </button>
+
+              <div className="mt-3 grid grid-cols-1 gap-2">
+                <button
+                  className="w-full rounded-xl border border-primary-600 py-2 text-primary-700 dark:text-primary-300 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={handleClaimEquity}
+                  disabled={isClaimingEquity || !walletAvailable || txInFlight}
+                >
+                  {isClaimingEquity ? 'Claiming Equity...' : 'Claim Equity Tokens'}
+                </button>
+                <button
+                  className="w-full rounded-xl border border-primary-600 py-2 text-primary-700 dark:text-primary-300 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={handleClaimProfit}
+                  disabled={isClaimingProfit || !walletAvailable || txInFlight}
+                >
+                  {isClaimingProfit ? 'Claiming Profit...' : 'Claim Profit (USDC)'}
+                </button>
+                {connectedAddress && claimableProfitBaseUnits !== null && (
+                  <div className="text-xs text-slate-500 dark:text-slate-400">
+                    Claimable now: {formatUsdcUnits(claimableProfitBaseUnits)} USDC
+                  </div>
+                )}
+                <button
+                  className="w-full rounded-xl border border-primary-600 py-2 text-primary-700 dark:text-primary-300 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={handleClaimRefund}
+                  disabled={isClaimingRefund || !canClaimRefund || !walletAvailable || txInFlight}
+                  title={canClaimRefund ? 'Claim refund from failed campaign' : 'Refunds available only when campaign is FAILED'}
+                >
+                  {isClaimingRefund ? 'Claiming Refund...' : canClaimRefund ? 'Claim Refund' : 'Refund Unavailable'}
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-white/70 bg-white/80 p-5 shadow-lg shadow-slate-200/30 backdrop-blur dark:border-white/10 dark:bg-slate-900/60 dark:shadow-black/30">
+              <h3 className="mb-3 text-lg font-semibold text-slate-900 dark:text-white">Property Overview</h3>
+              <div className="space-y-3 text-sm">
+                <div>
+                  <p className="text-slate-500 dark:text-slate-400">Description</p>
+                  <p className="text-slate-800 dark:text-slate-100">{property.description}</p>
+                </div>
+                {isConnected && connectedAddress && (
+                  <div>
+                    <p className="text-slate-500 dark:text-slate-400">Connected Wallet</p>
+                    <p className="break-all font-mono text-xs text-slate-700 dark:text-slate-300">
+                      {connectedAddress}
+                    </p>
+                  </div>
+                )}
+                <div>
+                  <p className="text-slate-500 dark:text-slate-400">Crowdfund Contract</p>
+                  <p className="break-all font-mono text-xs text-slate-700 dark:text-slate-300">
+                    {property.crowdfundAddress}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-slate-500 dark:text-slate-400">Crowdfund USDC Token</p>
+                  <p className="break-all font-mono text-xs text-slate-700 dark:text-slate-300">
+                    {effectiveUsdcAddress}
+                  </p>
+                </div>
+              </div>
+              {!usesOfficialUsdc && (
+                <div className="mt-3 rounded-xl bg-amber-50 px-4 py-3 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+                  This property uses a non-standard USDC token address. Investors must hold this exact
+                  token to invest, and ETH auto-swap routing may be unavailable.
+                </div>
+              )}
+              <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 dark:border-amber-800 dark:bg-amber-900/30 dark:text-amber-100">
+                Investing is risky and may result in loss of capital. Review{' '}
+                <Link to="/disclosures" className="font-medium underline">
+                  Risk Disclosures
+                </Link>{' '}
+                before transacting.
+              </div>
             </div>
           </div>
         </div>

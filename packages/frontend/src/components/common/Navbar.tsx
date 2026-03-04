@@ -87,8 +87,8 @@ export default function Navbar() {
               Dashboard
             </Link>
             {canViewOwnerConsole && (
-              <Link to="/owner" className="text-gray-700 dark:text-gray-300 hover:text-primary-600">
-                Owner Console
+              <Link to="/admin" className="text-gray-700 dark:text-gray-300 hover:text-primary-600">
+                Admin Console
               </Link>
             )}
           </div>
@@ -154,11 +154,11 @@ export default function Navbar() {
             </Link>
             {canViewOwnerConsole && (
               <Link
-                to="/owner"
+                to="/admin"
                 className="block text-gray-700 dark:text-gray-300 hover:text-primary-600"
                 onClick={() => setIsMobileMenuOpen(false)}
               >
-                Owner Console
+                Admin Console
               </Link>
             )}
             <div className="pt-2 text-sm">
@@ -209,11 +209,11 @@ export default function Navbar() {
               <div className="mt-1 text-blue-700 dark:text-blue-200">
                 For Sign in with Base, open the{' '}
                 <Link
-                  to="/owner"
+                  to="/admin"
                   className="underline"
                   onClick={() => setIsConnectModalOpen(false)}
                 >
-                  Owner Console
+                  Admin Console
                 </Link>
                 .
               </div>

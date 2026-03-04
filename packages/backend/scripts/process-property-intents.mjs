@@ -103,7 +103,17 @@ const loadPendingIntents = async () =>
       name,
       location,
       description,
+      image_url AS "imageUrl",
+      gallery_image_urls AS "imageUrls",
+      youtube_embed_url AS "youtubeEmbedUrl",
       target_usdc_base_units::text AS "targetUsdcBaseUnits",
+      estimated_sell_usdc_base_units::text AS "estimatedSellUsdcBaseUnits",
+      conservative_sell_usdc_base_units::text AS "conservativeSellUsdcBaseUnits",
+      base_sell_usdc_base_units::text AS "baseSellUsdcBaseUnits",
+      optimistic_sell_usdc_base_units::text AS "optimisticSellUsdcBaseUnits",
+      conservative_multiplier_bps AS "conservativeMultiplierBps",
+      base_multiplier_bps AS "baseMultiplierBps",
+      optimistic_multiplier_bps AS "optimisticMultiplierBps",
       start_time AS "startTime",
       end_time AS "endTime",
       LOWER(crowdfund_contract_address) AS "crowdfundAddress",
@@ -201,12 +211,21 @@ const upsertPropertyRecord = async ({
   name,
   location,
   description,
+  imageUrl,
+  youtubeEmbedUrl,
   crowdfundAddress,
   equityTokenAddress,
   profitDistributorAddress,
   targetUsdcBaseUnits,
+  estimatedSellUsdcBaseUnits,
+  conservativeSellUsdcBaseUnits,
+  baseSellUsdcBaseUnits,
+  optimisticSellUsdcBaseUnits,
+  conservativeMultiplierBps,
+  baseMultiplierBps,
+  optimisticMultiplierBps,
 }) => {
-  await sequelize.query(
+  const [rows] = await sequelize.query(
     `
     INSERT INTO properties (
       id,
@@ -215,10 +234,19 @@ const upsertPropertyRecord = async ({
       name,
       location,
       description,
+      image_url,
+      youtube_embed_url,
       crowdfund_contract_address,
       equity_token_address,
       profit_distributor_address,
       target_usdc_base_units,
+      estimated_sell_usdc_base_units,
+      conservative_sell_usdc_base_units,
+      base_sell_usdc_base_units,
+      optimistic_sell_usdc_base_units,
+      conservative_multiplier_bps,
+      base_multiplier_bps,
+      optimistic_multiplier_bps,
       created_at,
       updated_at
     )
@@ -229,10 +257,19 @@ const upsertPropertyRecord = async ({
       :name,
       :location,
       :description,
+      :imageUrl,
+      :youtubeEmbedUrl,
       :crowdfundAddress,
       :equityTokenAddress,
       :profitDistributorAddress,
       :targetUsdcBaseUnits,
+      :estimatedSellUsdcBaseUnits,
+      :conservativeSellUsdcBaseUnits,
+      :baseSellUsdcBaseUnits,
+      :optimisticSellUsdcBaseUnits,
+      :conservativeMultiplierBps,
+      :baseMultiplierBps,
+      :optimisticMultiplierBps,
       NOW(),
       NOW()
     )
@@ -243,10 +280,20 @@ const upsertPropertyRecord = async ({
       name = EXCLUDED.name,
       location = EXCLUDED.location,
       description = EXCLUDED.description,
+      image_url = EXCLUDED.image_url,
+      youtube_embed_url = EXCLUDED.youtube_embed_url,
       equity_token_address = EXCLUDED.equity_token_address,
       profit_distributor_address = EXCLUDED.profit_distributor_address,
       target_usdc_base_units = EXCLUDED.target_usdc_base_units,
+      estimated_sell_usdc_base_units = EXCLUDED.estimated_sell_usdc_base_units,
+      conservative_sell_usdc_base_units = EXCLUDED.conservative_sell_usdc_base_units,
+      base_sell_usdc_base_units = EXCLUDED.base_sell_usdc_base_units,
+      optimistic_sell_usdc_base_units = EXCLUDED.optimistic_sell_usdc_base_units,
+      conservative_multiplier_bps = EXCLUDED.conservative_multiplier_bps,
+      base_multiplier_bps = EXCLUDED.base_multiplier_bps,
+      optimistic_multiplier_bps = EXCLUDED.optimistic_multiplier_bps,
       updated_at = NOW()
+    RETURNING id AS "propertyUuid"
     `,
     {
       replacements: {
@@ -256,13 +303,71 @@ const upsertPropertyRecord = async ({
         name,
         location,
         description,
+        imageUrl,
+        youtubeEmbedUrl,
         crowdfundAddress,
         equityTokenAddress,
         profitDistributorAddress,
         targetUsdcBaseUnits,
+        estimatedSellUsdcBaseUnits,
+        conservativeSellUsdcBaseUnits,
+        baseSellUsdcBaseUnits,
+        optimisticSellUsdcBaseUnits,
+        conservativeMultiplierBps,
+        baseMultiplierBps,
+        optimisticMultiplierBps,
       },
     }
   );
+  return Array.isArray(rows) ? rows[0] : null;
+};
+
+const syncPropertyImages = async (propertyUuid, imageUrls) => {
+  if (!propertyUuid) {
+    return;
+  }
+  await sequelize.query(
+    `
+    DELETE FROM property_images
+    WHERE property_id = :propertyUuid
+    `,
+    { replacements: { propertyUuid } }
+  );
+
+  if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
+    return;
+  }
+
+  for (let index = 0; index < imageUrls.length; index += 1) {
+    const imageUrl = imageUrls[index];
+    if (!imageUrl || typeof imageUrl !== 'string') continue;
+    await sequelize.query(
+      `
+      INSERT INTO property_images (
+        id,
+        property_id,
+        image_url,
+        sort_order,
+        created_at
+      )
+      VALUES (
+        :id,
+        :propertyUuid,
+        :imageUrl,
+        :sortOrder,
+        NOW()
+      )
+      `,
+      {
+        replacements: {
+          id: randomUUID(),
+          propertyUuid,
+          imageUrl,
+          sortOrder: index,
+        },
+      }
+    );
+  }
 };
 
 const deployContractsForIntent = async (intent) => {
@@ -286,6 +391,34 @@ const deployContractsForIntent = async (intent) => {
   const targetUsdc = BigInt(intent.targetUsdcBaseUnits);
   if (targetUsdc <= 0n) {
     throw new Error('targetUsdcBaseUnits must be > 0');
+  }
+  const estimatedSellUsdc =
+    intent.estimatedSellUsdcBaseUnits && `${intent.estimatedSellUsdcBaseUnits}`.trim() !== ''
+      ? BigInt(intent.estimatedSellUsdcBaseUnits)
+      : null;
+  if (estimatedSellUsdc !== null && estimatedSellUsdc <= 0n) {
+    throw new Error('estimatedSellUsdcBaseUnits must be > 0 when provided');
+  }
+  const conservativeSellUsdc =
+    intent.conservativeSellUsdcBaseUnits && `${intent.conservativeSellUsdcBaseUnits}`.trim() !== ''
+      ? BigInt(intent.conservativeSellUsdcBaseUnits)
+      : null;
+  const baseSellUsdc =
+    intent.baseSellUsdcBaseUnits && `${intent.baseSellUsdcBaseUnits}`.trim() !== ''
+      ? BigInt(intent.baseSellUsdcBaseUnits)
+      : null;
+  const optimisticSellUsdc =
+    intent.optimisticSellUsdcBaseUnits && `${intent.optimisticSellUsdcBaseUnits}`.trim() !== ''
+      ? BigInt(intent.optimisticSellUsdcBaseUnits)
+      : null;
+  if (conservativeSellUsdc !== null && conservativeSellUsdc <= 0n) {
+    throw new Error('conservativeSellUsdcBaseUnits must be > 0 when provided');
+  }
+  if (baseSellUsdc !== null && baseSellUsdc <= 0n) {
+    throw new Error('baseSellUsdcBaseUnits must be > 0 when provided');
+  }
+  if (optimisticSellUsdc !== null && optimisticSellUsdc <= 0n) {
+    throw new Error('optimisticSellUsdcBaseUnits must be > 0 when provided');
   }
 
   const now = Math.floor(Date.now() / 1000);
@@ -359,17 +492,37 @@ const deployContractsForIntent = async (intent) => {
 
   try {
     const deployed = await deployOnce();
-    await upsertPropertyRecord({
+    const upserted = await upsertPropertyRecord({
       propertyId: intent.propertyId,
       chainId: Number(intent.chainId),
       name: intent.name,
       location: intent.location,
       description: intent.description,
+      imageUrl: intent.imageUrl ?? null,
+      youtubeEmbedUrl: intent.youtubeEmbedUrl ?? null,
       crowdfundAddress: deployed.crowdfundAddress,
       equityTokenAddress: deployed.equityAddress,
       profitDistributorAddress: deployed.profitDistributorAddress,
       targetUsdcBaseUnits: targetUsdc.toString(),
+      estimatedSellUsdcBaseUnits: estimatedSellUsdc ? estimatedSellUsdc.toString() : null,
+      conservativeSellUsdcBaseUnits: conservativeSellUsdc ? conservativeSellUsdc.toString() : null,
+      baseSellUsdcBaseUnits: baseSellUsdc ? baseSellUsdc.toString() : null,
+      optimisticSellUsdcBaseUnits: optimisticSellUsdc ? optimisticSellUsdc.toString() : null,
+      conservativeMultiplierBps:
+        Number.isInteger(Number(intent.conservativeMultiplierBps))
+          ? Number(intent.conservativeMultiplierBps)
+          : null,
+      baseMultiplierBps:
+        Number.isInteger(Number(intent.baseMultiplierBps)) ? Number(intent.baseMultiplierBps) : null,
+      optimisticMultiplierBps:
+        Number.isInteger(Number(intent.optimisticMultiplierBps))
+          ? Number(intent.optimisticMultiplierBps)
+          : null,
     });
+    await syncPropertyImages(
+      upserted?.propertyUuid,
+      Array.isArray(intent.imageUrls) ? intent.imageUrls : []
+    );
     return deployed;
   } catch (error) {
     const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
@@ -378,17 +531,39 @@ const deployContractsForIntent = async (intent) => {
       // submitted txs from the same operator key.
       signer.reset();
       const deployed = await deployOnce();
-      await upsertPropertyRecord({
+      const upserted = await upsertPropertyRecord({
         propertyId: intent.propertyId,
         chainId: Number(intent.chainId),
         name: intent.name,
         location: intent.location,
         description: intent.description,
+        imageUrl: intent.imageUrl ?? null,
+        youtubeEmbedUrl: intent.youtubeEmbedUrl ?? null,
         crowdfundAddress: deployed.crowdfundAddress,
         equityTokenAddress: deployed.equityAddress,
         profitDistributorAddress: deployed.profitDistributorAddress,
         targetUsdcBaseUnits: targetUsdc.toString(),
+        estimatedSellUsdcBaseUnits: estimatedSellUsdc ? estimatedSellUsdc.toString() : null,
+        conservativeSellUsdcBaseUnits: conservativeSellUsdc ? conservativeSellUsdc.toString() : null,
+        baseSellUsdcBaseUnits: baseSellUsdc ? baseSellUsdc.toString() : null,
+        optimisticSellUsdcBaseUnits: optimisticSellUsdc ? optimisticSellUsdc.toString() : null,
+        conservativeMultiplierBps:
+          Number.isInteger(Number(intent.conservativeMultiplierBps))
+            ? Number(intent.conservativeMultiplierBps)
+            : null,
+        baseMultiplierBps:
+          Number.isInteger(Number(intent.baseMultiplierBps))
+            ? Number(intent.baseMultiplierBps)
+            : null,
+        optimisticMultiplierBps:
+          Number.isInteger(Number(intent.optimisticMultiplierBps))
+            ? Number(intent.optimisticMultiplierBps)
+            : null,
       });
+      await syncPropertyImages(
+        upserted?.propertyUuid,
+        Array.isArray(intent.imageUrls) ? intent.imageUrls : []
+      );
       return deployed;
     }
     throw error;
