@@ -25,6 +25,8 @@ import {
 } from '../controllers/v1/meController.js';
 import {
   approveProfitAllowance,
+  finalizeCampaign,
+  getCampaignLifecyclePreflight,
   createCloudinaryUploadSignature,
   createIntentBatch,
   createPlatformFeeIntent,
@@ -39,6 +41,7 @@ import {
   listPropertyIntents,
   resetAdminIntent,
   retryAdminIntent,
+  withdrawCampaignFunds,
 } from '../controllers/v1/adminController.js';
 import { getAdminMetrics } from '../controllers/v1/observabilityController.js';
 import { quoteEthUsdc } from '../controllers/v1/quotesController.js';
@@ -85,6 +88,9 @@ router.get('/admin/profits/flow-status', auth, requireRole('owner'), getProfitFl
 router.get('/admin/platform-fees/preflight', auth, requireRole('owner'), getPlatformFeePreflight);
 router.get('/admin/platform-fees/flow-status', auth, requireRole('owner'), getPlatformFeeFlowStatus);
 router.get('/admin/platform-fees/intents', auth, requireRole('owner'), listPlatformFeeIntents);
+router.get('/admin/campaigns/preflight', auth, requireRole('owner'), getCampaignLifecyclePreflight);
+router.post('/admin/campaigns/finalize', auth, requireRole('owner'), finalizeCampaign);
+router.post('/admin/campaigns/withdraw', auth, requireRole('owner'), withdrawCampaignFunds);
 router.get('/admin/metrics', auth, requireRole('owner'), getAdminMetrics);
 
 export default router;

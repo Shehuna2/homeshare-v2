@@ -12,6 +12,7 @@ import {
   createPlatformFeeIntent,
   createProfitDistributionIntent,
   createPropertyIntent,
+  fetchCampaignLifecyclePreflight,
   fetchAdminProperties,
   fetchAdminMetrics,
   fetchCampaigns,
@@ -23,12 +24,14 @@ import {
   fetchPlatformFeeIntents,
   fetchProfitDistributionIntents,
   fetchPropertyIntents,
+  finalizeCampaignAdmin,
   getAuthNonce,
   loginWithWallet,
   resetAdminIntent,
   restoreAdminProperty,
   retryAdminIntent,
   updateAdminProperty,
+  withdrawCampaignFundsAdmin,
 } from '../lib/api';
 import { env } from '../config/env';
 import type {
@@ -44,6 +47,7 @@ import type {
   ProfitDistributionIntentResponse,
   PropertyIntentResponse,
   IntentType,
+  CampaignLifecyclePreflightResponse,
 } from '../lib/api';
 
 const PROFIT_ADVANCED_KEY = 'homeshare:owner:profit-advanced';
@@ -266,6 +270,7 @@ export default function OwnerConsole() {
     includeProfitIntent: true,
     includePlatformFeeIntent: true,
     profitUsdcAmount: '',
+    grossSettlementUsdc: '',
     platformFeeBps: '',
     platformFeeRecipient: '',
     profitDistributorAddress: '',
@@ -306,6 +311,21 @@ export default function OwnerConsole() {
     baseMultiplierPct: '',
     optimisticMultiplierPct: '',
   });
+  const [initialEditPropertyForm, setInitialEditPropertyForm] = useState({
+    name: '',
+    location: '',
+    description: '',
+    imageUrl: '',
+    imageUrlsText: '',
+    youtubeEmbedUrl: '',
+    estimatedSellUsdc: '',
+    conservativeSellUsdc: '',
+    baseSellUsdc: '',
+    optimisticSellUsdc: '',
+    conservativeMultiplierPct: '',
+    baseMultiplierPct: '',
+    optimisticMultiplierPct: '',
+  });
   const [propertyIntents, setPropertyIntents] = useState<PropertyIntentResponse[]>([]);
   const [profitIntents, setProfitIntents] = useState<ProfitDistributionIntentResponse[]>([]);
   const [platformFeeIntents, setPlatformFeeIntents] = useState<PlatformFeeIntentResponse[]>([]);
@@ -322,6 +342,10 @@ export default function OwnerConsole() {
   const [platformFeePreflight, setPlatformFeePreflight] = useState<PlatformFeePreflightResponse | null>(null);
   const [platformFeeFlowStatus, setPlatformFeeFlowStatus] = useState<PlatformFeeFlowStatusResponse | null>(null);
   const [platformFeeChecksLoading, setPlatformFeeChecksLoading] = useState(false);
+  const [campaignLifecyclePreflightByAddress, setCampaignLifecyclePreflightByAddress] = useState<
+    Record<string, CampaignLifecyclePreflightResponse>
+  >({});
+  const [campaignLifecycleLoadingKey, setCampaignLifecycleLoadingKey] = useState<string | null>(null);
   const [combinedHistory, setCombinedHistory] = useState<CombinedSubmissionRecord[]>(() =>
     loadCombinedHistory()
   );
@@ -382,6 +406,19 @@ export default function OwnerConsole() {
     combinedForm.platformFeeRecipient.trim() ||
     selectedCombinedCampaign?.platformFeeRecipient ||
     '';
+  const normalizedCombinedFeeBps = Number(combinedForm.platformFeeBps || '0');
+  const normalizedCombinedGrossSettlementUsdc = Number(combinedForm.grossSettlementUsdc || '0');
+  const computedCombinedFeeUsdc =
+    Number.isFinite(normalizedCombinedGrossSettlementUsdc) &&
+    normalizedCombinedGrossSettlementUsdc > 0 &&
+    Number.isFinite(normalizedCombinedFeeBps) &&
+    normalizedCombinedFeeBps >= 0
+      ? (normalizedCombinedGrossSettlementUsdc * normalizedCombinedFeeBps) / 10_000
+      : 0;
+  const computedCombinedNetDistributionUsdc = Math.max(
+    0,
+    normalizedCombinedGrossSettlementUsdc - computedCombinedFeeUsdc
+  );
   const basescanTxUrl = (txHash: string) => `https://sepolia.basescan.org/tx/${txHash}`;
   const previousCombinedOutcomeRef = useRef<Record<string, CombinedRowOutcome>>({});
   const profitIntentById = useMemo(() => {
@@ -534,10 +571,10 @@ export default function OwnerConsole() {
   };
 
   const intentStatusClass = (status: string) => {
-    if (status === 'confirmed') return 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-200';
-    if (status === 'failed') return 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-200';
-    if (status === 'submitted') return 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-200';
-    return 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-200';
+    if (status === 'confirmed') return 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30';
+    if (status === 'failed') return 'bg-red-500/20 text-red-300 border border-red-500/30';
+    if (status === 'submitted') return 'bg-amber-500/20 text-amber-300 border border-amber-500/30';
+    return 'bg-slate-700/40 text-slate-300 border border-slate-600/30';
   };
 
   const handlePropertyChange = (field: keyof typeof propertyForm, value: string) => {
@@ -891,52 +928,71 @@ export default function OwnerConsole() {
 
   const handleCreateCombinedIntentBatch = async () => {
     setErrorMessage('');
-    setStatusMessage('Submitting combined intents...');
+    setStatusMessage('Submitting settlement intents...');
     try {
       if (!token) {
         throw new Error('You must be logged in as an admin to submit intents.');
       }
       if (!combinedForm.campaignAddress.trim()) {
-        throw new Error('Select a campaign for combined submit.');
+        throw new Error('Select a campaign for settlement.');
       }
       if (!selectedCombinedCampaign) {
         throw new Error('Selected campaign is not available.');
       }
-      if (!combinedForm.includeProfitIntent && !combinedForm.includePlatformFeeIntent) {
-        throw new Error('Enable at least one intent type (profit or platform fee).');
+      if (!effectiveCombinedDistributor) {
+        throw new Error('Profit distributor is missing for selected campaign/property.');
+      }
+      const bps = Number(combinedForm.platformFeeBps);
+      if (!Number.isInteger(bps) || bps < 0 || bps > 2000) {
+        throw new Error('Platform fee bps must be an integer between 0 and 2000.');
+      }
+      if (bps > 0 && !effectiveCombinedRecipient) {
+        throw new Error('Platform fee recipient is required when fee is greater than 0.');
+      }
+
+      const grossSettlementUsdc = Number(combinedForm.grossSettlementUsdc);
+      if (!Number.isFinite(grossSettlementUsdc) || grossSettlementUsdc <= 0) {
+        throw new Error('Gross settlement amount must be greater than 0.');
+      }
+
+      const feeUsdc = (grossSettlementUsdc * bps) / 10_000;
+      const netDistributionUsdc = grossSettlementUsdc - feeUsdc;
+      if (!Number.isFinite(netDistributionUsdc) || netDistributionUsdc <= 0) {
+        throw new Error('Net investor distribution must be greater than 0 after platform fee.');
+      }
+      const recipientPreview = bps === 0 ? 'N/A (fee disabled)' : effectiveCombinedRecipient;
+      const confirmation = window.confirm(
+        [
+          'Confirm settlement submission',
+          '',
+          `Campaign: ${combinedForm.campaignAddress.trim()}`,
+          `Property: ${selectedCombinedCampaign.propertyId}`,
+          `Gross settlement: ${grossSettlementUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`,
+          `Platform fee (${bps} bps): ${feeUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`,
+          `Net investor distribution: ${netDistributionUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`,
+          `Fee recipient: ${recipientPreview}`,
+          `Profit distributor: ${effectiveCombinedDistributor}`,
+          '',
+          'Proceed?',
+        ].join('\n')
+      );
+      if (!confirmation) {
+        setStatusMessage('Settlement submission cancelled.');
+        return;
       }
 
       const payload: Parameters<typeof createAdminIntentBatch>[0] = {
         chainId: 84532,
-        includeProfitIntent: combinedForm.includeProfitIntent,
-        includePlatformFeeIntent: combinedForm.includePlatformFeeIntent,
+        includeProfitIntent: true,
+        includePlatformFeeIntent: true,
+        propertyId: selectedCombinedCampaign.propertyId,
+        profitDistributorAddress: effectiveCombinedDistributor,
+        usdcAmountBaseUnits: Math.round(netDistributionUsdc * 1_000_000).toString(),
+        campaignAddress: combinedForm.campaignAddress.trim(),
+        platformFeeBps: bps,
+        platformFeeRecipient: bps === 0 ? null : effectiveCombinedRecipient,
+        platformFeeUsdcAmountBaseUnits: Math.round(feeUsdc * 1_000_000).toString(),
       };
-
-      if (combinedForm.includeProfitIntent) {
-        const normalizedAmount = Number(combinedForm.profitUsdcAmount);
-        if (!Number.isFinite(normalizedAmount) || normalizedAmount <= 0) {
-          throw new Error('Profit amount must be greater than 0 for combined submit.');
-        }
-        if (!effectiveCombinedDistributor) {
-          throw new Error('Profit distributor is missing for combined submit.');
-        }
-        payload.propertyId = selectedCombinedCampaign.propertyId;
-        payload.profitDistributorAddress = effectiveCombinedDistributor;
-        payload.usdcAmountBaseUnits = Math.round(normalizedAmount * 1_000_000).toString();
-      }
-
-      if (combinedForm.includePlatformFeeIntent) {
-        const bps = Number(combinedForm.platformFeeBps);
-        if (!Number.isInteger(bps) || bps < 0 || bps > 2000) {
-          throw new Error('Platform fee bps must be an integer between 0 and 2000.');
-        }
-        if (bps > 0 && !effectiveCombinedRecipient) {
-          throw new Error('Platform fee recipient is required when fee is greater than 0.');
-        }
-        payload.campaignAddress = combinedForm.campaignAddress.trim();
-        payload.platformFeeBps = bps;
-        payload.platformFeeRecipient = bps === 0 ? null : effectiveCombinedRecipient;
-      }
 
       const response = await createAdminIntentBatch(payload, token);
       const created: string[] = [];
@@ -944,8 +1000,8 @@ export default function OwnerConsole() {
       if (response.platformFeeIntent) created.push('platform-fee');
       setStatusMessage(
         created.length > 0
-          ? `Combined submit successful: ${created.join(' + ')} intent(s) created.`
-          : 'Combined submit completed.'
+          ? `Settlement submit successful: ${created.join(' + ')} intent(s) created.`
+          : 'Settlement submit completed.'
       );
       const historyRecord: CombinedSubmissionRecord = {
         id:
@@ -955,8 +1011,8 @@ export default function OwnerConsole() {
         createdAt: new Date().toISOString(),
         campaignAddress: combinedForm.campaignAddress.trim(),
         propertyId: selectedCombinedCampaign.propertyId,
-        includeProfitIntent: combinedForm.includeProfitIntent,
-        includePlatformFeeIntent: combinedForm.includePlatformFeeIntent,
+        includeProfitIntent: true,
+        includePlatformFeeIntent: true,
         profitIntentId: response.profitIntent?.id ?? null,
         platformFeeIntentId: response.platformFeeIntent?.id ?? null,
       };
@@ -965,6 +1021,7 @@ export default function OwnerConsole() {
       setCombinedForm((prev) => ({
         ...prev,
         profitUsdcAmount: '',
+        grossSettlementUsdc: '',
         includeProfitIntent: true,
         includePlatformFeeIntent: true,
       }));
@@ -1238,8 +1295,7 @@ export default function OwnerConsole() {
   };
 
   const openEditPropertyModal = (property: AdminPropertyResponse) => {
-    setEditingPropertyId(property.propertyId);
-    setEditPropertyForm({
+    const nextForm = {
       name: property.name ?? '',
       location: property.location ?? '',
       description: property.description ?? '',
@@ -1267,7 +1323,10 @@ export default function OwnerConsole() {
       optimisticMultiplierPct: property.optimisticMultiplierBps
         ? (property.optimisticMultiplierBps / 100).toString()
         : '',
-    });
+    };
+    setEditingPropertyId(property.propertyId);
+    setEditPropertyForm(nextForm);
+    setInitialEditPropertyForm(nextForm);
     setShowEditPropertyModal(true);
   };
 
@@ -1467,6 +1526,133 @@ export default function OwnerConsole() {
     }
   };
 
+  const prettyLifecycleReason = (reason: string): string => {
+    if (reason === 'operator-wallet-not-configured') return 'Operator wallet is not configured';
+    if (reason === 'campaign-owner-not-operator') return 'Campaign owner does not match operator wallet';
+    if (reason === 'campaign-not-finishable-yet')
+      return 'Campaign cannot be finalized yet (target not reached and end time not elapsed)';
+    if (reason === 'campaign-usdc-balance-zero') return 'Campaign USDC balance is zero';
+    if (reason.startsWith('campaign-state-')) {
+      const state = reason.replace('campaign-state-', '').toUpperCase();
+      return `Campaign state is ${state}`;
+    }
+    return reason;
+  };
+
+  const loadCampaignLifecyclePreflight = async (campaignAddress: string) => {
+    if (!token) {
+      throw new Error('You must be logged in as an admin to manage campaigns.');
+    }
+    const preflight = await fetchCampaignLifecyclePreflight(token, campaignAddress);
+    setCampaignLifecyclePreflightByAddress((prev) => ({
+      ...prev,
+      [campaignAddress.toLowerCase()]: preflight,
+    }));
+    return preflight;
+  };
+
+  const handleFinalizeCampaign = async (campaignAddress: string) => {
+    if (!token) {
+      setErrorMessage('You must be logged in as an admin to manage campaigns.');
+      return;
+    }
+
+    const actionKey = `finalize:${campaignAddress.toLowerCase()}`;
+    setCampaignLifecycleLoadingKey(actionKey);
+    setErrorMessage('');
+    setStatusMessage('Checking finalize readiness...');
+    try {
+      const preflight = await loadCampaignLifecyclePreflight(campaignAddress);
+      if (!preflight.actions.finalize.ready) {
+        throw new Error(
+          `Finalize blocked: ${preflight.actions.finalize.reasons
+            .map(prettyLifecycleReason)
+            .join('; ')}`
+        );
+      }
+      setStatusMessage('Submitting finalize transaction...');
+      const result = await finalizeCampaignAdmin(token, {
+        campaignAddress,
+        chainId: 84532,
+      });
+      setStatusMessage(`Finalize submitted: ${result.txHash}`);
+      await Promise.all([loadCampaigns(), loadIntents(token)]);
+      await loadCampaignLifecyclePreflight(campaignAddress);
+    } catch (error) {
+      setErrorMessage((error as Error).message);
+      setStatusMessage('');
+    } finally {
+      setCampaignLifecycleLoadingKey(null);
+    }
+  };
+
+  const handleCheckCampaignLifecycle = async (campaignAddress: string) => {
+    if (!token) {
+      setErrorMessage('You must be logged in as an admin to manage campaigns.');
+      return;
+    }
+    const actionKey = `check:${campaignAddress.toLowerCase()}`;
+    setCampaignLifecycleLoadingKey(actionKey);
+    setErrorMessage('');
+    setStatusMessage('Loading campaign lifecycle checks...');
+    try {
+      await loadCampaignLifecyclePreflight(campaignAddress);
+      setStatusMessage('Campaign lifecycle checks refreshed.');
+    } catch (error) {
+      setErrorMessage((error as Error).message);
+      setStatusMessage('');
+    } finally {
+      setCampaignLifecycleLoadingKey(null);
+    }
+  };
+
+  const handleWithdrawCampaignFunds = async (campaignAddress: string) => {
+    if (!token) {
+      setErrorMessage('You must be logged in as an admin to manage campaigns.');
+      return;
+    }
+
+    const actionKey = `withdraw:${campaignAddress.toLowerCase()}`;
+    setCampaignLifecycleLoadingKey(actionKey);
+    setErrorMessage('');
+    setStatusMessage('Checking withdraw readiness...');
+    try {
+      const preflight = await loadCampaignLifecyclePreflight(campaignAddress);
+      if (!preflight.actions.withdraw.ready) {
+        throw new Error(
+          `Withdraw blocked: ${preflight.actions.withdraw.reasons
+            .map(prettyLifecycleReason)
+            .join('; ')}`
+        );
+      }
+
+      const recipientDefault =
+        connectedWalletAddress || address || preflight.operatorAddress || preflight.contractOwner;
+      const recipient = window
+        .prompt('Recipient address for withdrawFunds', recipientDefault ?? '')
+        ?.trim();
+      if (!recipient) {
+        setStatusMessage('Withdraw cancelled.');
+        return;
+      }
+
+      setStatusMessage('Submitting withdraw transaction...');
+      const result = await withdrawCampaignFundsAdmin(token, {
+        campaignAddress,
+        recipient,
+        chainId: 84532,
+      });
+      setStatusMessage(`Withdraw submitted: ${result.txHash}`);
+      await Promise.all([loadCampaigns(), loadIntents(token)]);
+      await loadCampaignLifecyclePreflight(campaignAddress);
+    } catch (error) {
+      setErrorMessage((error as Error).message);
+      setStatusMessage('');
+    } finally {
+      setCampaignLifecycleLoadingKey(null);
+    }
+  };
+
   const handleIntentAction = async (
     action: 'retry' | 'reset',
     intentType: IntentType,
@@ -1656,6 +1842,7 @@ export default function OwnerConsole() {
     setPlatformFeeIntents([]);
     setAdminMetrics(null);
     setAdminProperties([]);
+    setCampaignLifecyclePreflightByAddress({});
     setIntentsLoading(false);
   }, [canManageOwnerFlows, token]);
 
@@ -1894,1831 +2081,1089 @@ export default function OwnerConsole() {
   }, [showPlatformAdvanced]);
 
   return (
-    <div className="bg-gradient-to-br from-slate-50 via-white to-slate-100 py-10 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
-      <div className="container mx-auto px-4">
-      <div className="mb-8 rounded-2xl border border-white/70 bg-white/85 p-6 shadow-xl shadow-slate-200/40 backdrop-blur dark:border-white/10 dark:bg-slate-900/70 dark:shadow-black/40">
-        <h1 className="text-3xl font-semibold tracking-tight text-slate-900 dark:text-white">
-          Admin Console
-        </h1>
-        <p className="mt-2 text-slate-600 dark:text-slate-300">
-          Operate intents, campaign settings, and property lifecycle from one control plane.
-        </p>
+    <div className="relative min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+      {/* Animated background orbs */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-1/4 -left-64 w-96 h-96 bg-blue-500/20 rounded-full blur-3xl animate-pulse" style={{ animationDelay: '0s' }} />
+        <div className="absolute bottom-1/3 -right-64 w-80 h-80 bg-emerald-500/15 rounded-full blur-3xl animate-pulse" style={{ animationDelay: '2s' }} />
       </div>
 
-      {!canViewOwnerConsole && (
-        <div className="mb-6 rounded-lg bg-amber-50 px-4 py-3 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
-          Admin operations are hidden. Connect an allowlisted admin wallet to unlock this console.
-        </div>
-      )}
-
-      <div className="mb-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 dark:border-amber-800 dark:bg-amber-900/30 dark:text-amber-100">
-        Admin actions can materially affect investor outcomes. Review{' '}
-        <Link to="/disclosures" className="underline font-medium">
-          Risk Disclosures
-        </Link>{' '}
-        and ensure legal/compliance approvals are in place before production operations.
-      </div>
-
-      <div className="mb-8 rounded-2xl border border-white/70 bg-white/85 px-4 py-4 shadow-lg shadow-slate-200/30 backdrop-blur dark:border-white/10 dark:bg-slate-900/70 dark:shadow-black/35">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="text-sm text-gray-600 dark:text-gray-300">
-            Connected: {connectedWalletAddress ? `${connectedWalletAddress.slice(0, 6)}...${connectedWalletAddress.slice(-4)}` : 'Not connected'}
-            {' '}| Session: {address ? `${address.slice(0, 6)}...${address.slice(-4)}` : 'Not authenticated'} {role ? `(${role})` : ''}
+      {/* Content */}
+      <div className="relative z-10 py-10">
+        <div className="container mx-auto px-4">
+          {/* Hero Section */}
+          <div className="mb-8 rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-2xl shadow-black/40 backdrop-blur">
+            <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">
+              Admin Console
+            </h1>
+            <p className="mt-2 text-slate-300">
+              Operate intents, campaign settings, and property lifecycle from one control plane.
+            </p>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {canViewOwnerConsole && (
-              <>
-                <button
-                  className="rounded-xl bg-primary-600 px-4 py-2 text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-60"
-                  onClick={() => setShowCreatePropertyModal(true)}
-                  disabled={!canManageOwnerFlows}
-                >
-                  Create Property
-                </button>
-                <button
-                  className="rounded-xl border border-primary-600 px-4 py-2 text-primary-700 dark:text-primary-300 disabled:cursor-not-allowed disabled:opacity-60"
-                  onClick={() => setShowCreateProfitModal(true)}
-                  disabled={!canManageOwnerFlows}
-                >
-                  Create Profit Intent
-                </button>
-                <button
-                  className="rounded-xl border border-primary-600 px-4 py-2 text-primary-700 dark:text-primary-300 disabled:cursor-not-allowed disabled:opacity-60"
-                  onClick={() => setShowPlatformFeeModal(true)}
-                  disabled={!canManageOwnerFlows}
-                >
-                  Create Platform Fee Intent
-                </button>
-                <button
-                  className="rounded-xl border border-primary-600 px-4 py-2 text-primary-700 dark:text-primary-300 disabled:cursor-not-allowed disabled:opacity-60"
-                  onClick={() => setShowCombinedIntentModal(true)}
-                  disabled={!canManageOwnerFlows}
-                >
-                  Combined Submit
-                </button>
-              </>
-            )}
-            {isAuthenticated && (
-              <button
-                className="rounded-xl border border-slate-300 px-4 py-2 text-slate-700 dark:border-slate-600 dark:text-slate-200"
-                onClick={handleLogout}
-              >
-                Log out
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
 
-      {showCreatePropertyModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-white/70 bg-white/90 p-6 shadow-2xl shadow-slate-300/40 dark:border-white/10 dark:bg-slate-900/90 dark:shadow-black/50">
-            <div className="sticky top-0 z-10 -mx-6 -mt-6 mb-4 flex items-center justify-between border-b border-gray-200 bg-white px-6 py-4 dark:border-gray-700 dark:bg-gray-800">
-              <h2 className="text-xl font-bold text-gray-900 dark:text-white">Create Property</h2>
-              <button
-                className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-700 dark:border-gray-600 dark:text-gray-200"
-                onClick={() => {
-                  setShowCreatePropertyModal(false);
-                  setPropertyImageFile(null);
-                  setPropertyImageUploadProgress(0);
-                  setPropertyImageUploadState('idle');
-                  setPropertyImageUploadDebug('');
-                }}
-              >
-                Close
-              </button>
+          {!canViewOwnerConsole && (
+            <div className="mb-6 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-amber-200 backdrop-blur">
+              Admin operations are hidden. Connect an allowlisted admin wallet to unlock this console.
             </div>
-            <div className="space-y-4">
-              <input
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="Property name"
-                value={propertyForm.name}
-                onChange={(event) => handlePropertyChange('name', event.target.value)}
-              />
-              <input
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="Property ID (optional)"
-                value={propertyForm.propertyId}
-                onChange={(event) => handlePropertyChange('propertyId', event.target.value)}
-              />
-              <input
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="Location"
-                value={propertyForm.location}
-                onChange={(event) => handlePropertyChange('location', event.target.value)}
-              />
-              <textarea
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="Description"
-                rows={3}
-                value={propertyForm.description}
-                onChange={(event) => handlePropertyChange('description', event.target.value)}
-              />
-              <input
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="Image URL (optional)"
-                value={propertyForm.imageUrl}
-                onChange={(event) => handlePropertyChange('imageUrl', event.target.value)}
-              />
-              <textarea
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="Gallery image URLs (one per line, optional)"
-                rows={3}
-                value={propertyForm.imageUrlsText}
-                onChange={(event) => handlePropertyChange('imageUrlsText', event.target.value)}
-              />
-              <div className="rounded-lg border border-dashed border-gray-300 p-3 dark:border-gray-600">
-                <p className="mb-2 text-xs text-gray-500 dark:text-gray-400">
-                  Or upload image directly to Cloudinary
-                </p>
-                <div className="flex flex-col gap-2 md:flex-row md:items-center">
-                  <input
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp,image/gif"
-                    onChange={(event) => {
-                      const file = event.target.files?.[0] ?? null;
-                      setPropertyImageFile(file);
-                    }}
-                    className="text-sm text-gray-700 dark:text-gray-200"
-                  />
+          )}
+
+          <div className="mb-6 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-amber-200 backdrop-blur">
+            Admin actions can materially affect investor outcomes. Review{' '}
+            <Link to="/disclosures" className="font-medium underline">
+              Risk Disclosures
+            </Link>{' '}
+            and ensure legal/compliance approvals are in place before production operations.
+          </div>
+
+          {/* Session & Controls Bar */}
+          <div className="mb-8 rounded-2xl border border-white/10 bg-slate-900/50 px-4 py-4 shadow-xl shadow-black/25 backdrop-blur">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="text-sm text-slate-300">
+                Connected: {connectedWalletAddress ? `${connectedWalletAddress.slice(0, 6)}...${connectedWalletAddress.slice(-4)}` : 'Not connected'}
+                {' '}| Session: {address ? `${address.slice(0, 6)}...${address.slice(-4)}` : 'Not authenticated'} {role ? `(${role})` : ''}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {canViewOwnerConsole && (
+                  <>
+                    <button
+                      className="rounded-lg bg-gradient-to-r from-emerald-600 to-emerald-500 px-4 py-2 text-white font-medium hover:shadow-lg hover:shadow-emerald-500/30 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+                      onClick={() => setShowCreatePropertyModal(true)}
+                      disabled={!canManageOwnerFlows}
+                    >
+                      Create Property
+                    </button>
+                    <button
+                      className="rounded-lg border border-blue-500/50 bg-blue-500/10 px-4 py-2 text-blue-300 hover:bg-blue-500/20 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+                      onClick={() => setShowCreateProfitModal(true)}
+                      disabled={!canManageOwnerFlows}
+                    >
+                      Create Profit Intent
+                    </button>
+                    <button
+                      className="rounded-lg border border-purple-500/50 bg-purple-500/10 px-4 py-2 text-purple-300 hover:bg-purple-500/20 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+                      onClick={() => setShowPlatformFeeModal(true)}
+                      disabled={!canManageOwnerFlows}
+                    >
+                      Create Platform Fee Intent
+                    </button>
+                    <button
+                      className="rounded-lg border border-slate-600 bg-slate-800/50 px-4 py-2 text-slate-300 hover:bg-slate-700/50 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+                      onClick={() => setShowCombinedIntentModal(true)}
+                      disabled={!canManageOwnerFlows}
+                    >
+                      Settlement Wizard
+                    </button>
+                  </>
+                )}
+                {isAuthenticated && (
                   <button
-                    type="button"
-                    className="rounded-lg border border-primary-500 px-4 py-2 text-sm font-medium text-primary-600 hover:bg-primary-50 disabled:cursor-not-allowed disabled:opacity-60 dark:text-primary-300 dark:hover:bg-primary-900/20"
-                    onClick={handleUploadPropertyImage}
-                    disabled={!propertyImageFile || isUploadingPropertyImage || !canManageOwnerFlows}
+                    className="rounded-lg border border-slate-600 bg-slate-800/50 px-4 py-2 text-slate-300 hover:bg-slate-700/50 transition-all"
+                    onClick={handleLogout}
                   >
-                    {isUploadingPropertyImage ? 'Uploading...' : 'Upload Image'}
+                    Log out
                   </button>
-                </div>
-                {propertyImageFile && (
-                  <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                    Selected: {propertyImageFile.name} ({(propertyImageFile.size / 1024).toFixed(1)} KB)
-                  </p>
                 )}
-                {isUploadingPropertyImage && (
-                  <div className="mt-2">
-                    <div className="h-2 w-full overflow-hidden rounded bg-gray-200 dark:bg-gray-700">
-                      <div
-                        className="h-full bg-primary-600 transition-all"
-                        style={{ width: `${propertyImageUploadProgress}%` }}
-                      />
-                    </div>
-                    <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                      Upload progress: {propertyImageUploadProgress}%
-                    </p>
-                  </div>
-                )}
-                {!isUploadingPropertyImage && propertyImageUploadState === 'success' && (
-                  <p className="mt-2 text-xs text-green-700 dark:text-green-300">
-                    Upload completed. Image URL has been auto-filled.
-                  </p>
-                )}
-                {!isUploadingPropertyImage && propertyImageUploadState === 'error' && (
-                  <p className="mt-2 text-xs text-red-700 dark:text-red-300">
-                    Upload failed. Check debug response below.
-                  </p>
-                )}
-                {propertyImageUploadDebug && (
-                  <details className="mt-2 rounded border border-gray-200 p-2 text-xs dark:border-gray-700">
-                    <summary className="cursor-pointer select-none text-gray-600 dark:text-gray-300">
-                      Cloudinary response (debug)
-                    </summary>
-                    <pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap text-gray-700 dark:text-gray-200">
-                      {propertyImageUploadDebug}
-                    </pre>
-                  </details>
-                )}
-              </div>
-              <input
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="YouTube URL (watch/share/embed, optional)"
-                value={propertyForm.youtubeEmbedUrl}
-                onChange={(event) => handlePropertyChange('youtubeEmbedUrl', event.target.value)}
-              />
-              <div className="grid grid-cols-2 gap-4">
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Target raise (USDC)"
-                  value={propertyForm.targetUsdc}
-                  onChange={(event) => handlePropertyChange('targetUsdc', event.target.value)}
-                />
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Estimated sell price (USDC)"
-                  value={propertyForm.estimatedSellUsdc}
-                  onChange={(event) =>
-                    handlePropertyChange('estimatedSellUsdc', event.target.value)
-                  }
-                />
-                <div className="text-xs text-gray-500 dark:text-gray-400 self-center">
-                  Stored as USDC base units in the backend intent queue.
-                </div>
-              </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Conservative sell (USDC)"
-                  value={propertyForm.conservativeSellUsdc}
-                  onChange={(event) =>
-                    handlePropertyChange('conservativeSellUsdc', event.target.value)
-                  }
-                />
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Base sell (USDC)"
-                  value={propertyForm.baseSellUsdc}
-                  onChange={(event) => handlePropertyChange('baseSellUsdc', event.target.value)}
-                />
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Optimistic sell (USDC)"
-                  value={propertyForm.optimisticSellUsdc}
-                  onChange={(event) =>
-                    handlePropertyChange('optimisticSellUsdc', event.target.value)
-                  }
-                />
-              </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Conservative multiplier % (e.g. 85)"
-                  value={propertyForm.conservativeMultiplierPct}
-                  onChange={(event) =>
-                    handlePropertyChange('conservativeMultiplierPct', event.target.value)
-                  }
-                />
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Base multiplier % (e.g. 100)"
-                  value={propertyForm.baseMultiplierPct}
-                  onChange={(event) => handlePropertyChange('baseMultiplierPct', event.target.value)}
-                />
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Optimistic multiplier % (e.g. 125)"
-                  value={propertyForm.optimisticMultiplierPct}
-                  onChange={(event) =>
-                    handlePropertyChange('optimisticMultiplierPct', event.target.value)
-                  }
-                />
-              </div>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <label className="text-sm text-gray-600 dark:text-gray-300">
-                  Campaign Start
-                  <input
-                    type="datetime-local"
-                    className="mt-1 w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                    value={propertyForm.startTime}
-                    onChange={(event) => handlePropertyChange('startTime', event.target.value)}
-                  />
-                </label>
-                <label className="text-sm text-gray-600 dark:text-gray-300">
-                  Campaign End
-                  <input
-                    type="datetime-local"
-                    className="mt-1 w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                    value={propertyForm.endTime}
-                    onChange={(event) => handlePropertyChange('endTime', event.target.value)}
-                  />
-                </label>
-              </div>
-              <div className="grid grid-cols-1 gap-4">
-                <select
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  value={propertyForm.chainId}
-                  onChange={(event) => handlePropertyChange('chainId', event.target.value)}
-                >
-                  <option value="84532">Base Sepolia</option>
-                  <option value="8453">Base Mainnet</option>
-                </select>
-              </div>
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                This submits `/v1/admin/properties/intents`. Onchain deployment is executed by operator
-                automation and new Base Sepolia campaigns are pinned to official USDC.
-              </p>
-              <div className="sticky bottom-0 z-10 -mx-6 -mb-6 flex justify-end gap-2 border-t border-gray-200 bg-white px-6 py-4 dark:border-gray-700 dark:bg-gray-800">
-                <button
-                  className="rounded-xl border border-slate-300 px-4 py-2 text-slate-700 dark:border-slate-600 dark:text-slate-200"
-                  onClick={() => {
-                    setShowCreatePropertyModal(false);
-                    setPropertyImageFile(null);
-                    setPropertyImageUploadProgress(0);
-                    setPropertyImageUploadState('idle');
-                    setPropertyImageUploadDebug('');
-                  }}
-                >
-                  Cancel
-                </button>
-              <button
-                className="bg-primary-600 text-white px-6 py-2 rounded-lg hover:bg-primary-700"
-                onClick={handleCreateProperty}
-                disabled={
-                  !canManageOwnerFlows ||
-                  isUploadingPropertyImage ||
-                  Boolean(propertyImageFile && !propertyForm.imageUrl.trim())
-                }
-              >
-                Create Property Intent
-              </button>
               </div>
             </div>
           </div>
-        </div>
-      )}
 
-      {showEditPropertyModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-white/70 bg-white/90 p-6 shadow-2xl shadow-slate-300/40 dark:border-white/10 dark:bg-slate-900/90 dark:shadow-black/50">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-xl font-bold text-gray-900 dark:text-white">
-                Edit Property: {editingPropertyId}
-              </h2>
-              <button
-                className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-700 dark:border-gray-600 dark:text-gray-200"
-                onClick={() => {
-                  setShowEditPropertyModal(false);
-                  setEditingPropertyId('');
-                }}
-              >
-                Close
-              </button>
-            </div>
-            <div className="space-y-4">
-              <input
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="Property name"
-                value={editPropertyForm.name}
-                onChange={(event) => handleEditPropertyChange('name', event.target.value)}
-              />
-              <input
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="Location"
-                value={editPropertyForm.location}
-                onChange={(event) => handleEditPropertyChange('location', event.target.value)}
-              />
-              <textarea
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="Description"
-                rows={3}
-                value={editPropertyForm.description}
-                onChange={(event) => handleEditPropertyChange('description', event.target.value)}
-              />
-              <input
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="Image URL"
-                value={editPropertyForm.imageUrl}
-                onChange={(event) => handleEditPropertyChange('imageUrl', event.target.value)}
-              />
-              <textarea
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="Gallery image URLs (one per line)"
-                rows={4}
-                value={editPropertyForm.imageUrlsText}
-                onChange={(event) => handleEditPropertyChange('imageUrlsText', event.target.value)}
-              />
-              <input
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="YouTube URL (watch/share/embed)"
-                value={editPropertyForm.youtubeEmbedUrl}
-                onChange={(event) => handleEditPropertyChange('youtubeEmbedUrl', event.target.value)}
-              />
-              <input
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="Estimated sell price (USDC)"
-                value={editPropertyForm.estimatedSellUsdc}
-                onChange={(event) => handleEditPropertyChange('estimatedSellUsdc', event.target.value)}
-              />
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Conservative sell (USDC)"
-                  value={editPropertyForm.conservativeSellUsdc}
-                  onChange={(event) =>
-                    handleEditPropertyChange('conservativeSellUsdc', event.target.value)
-                  }
-                />
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Base sell (USDC)"
-                  value={editPropertyForm.baseSellUsdc}
-                  onChange={(event) => handleEditPropertyChange('baseSellUsdc', event.target.value)}
-                />
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Optimistic sell (USDC)"
-                  value={editPropertyForm.optimisticSellUsdc}
-                  onChange={(event) =>
-                    handleEditPropertyChange('optimisticSellUsdc', event.target.value)
-                  }
-                />
-              </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Conservative multiplier %"
-                  value={editPropertyForm.conservativeMultiplierPct}
-                  onChange={(event) =>
-                    handleEditPropertyChange('conservativeMultiplierPct', event.target.value)
-                  }
-                />
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Base multiplier %"
-                  value={editPropertyForm.baseMultiplierPct}
-                  onChange={(event) =>
-                    handleEditPropertyChange('baseMultiplierPct', event.target.value)
-                  }
-                />
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Optimistic multiplier %"
-                  value={editPropertyForm.optimisticMultiplierPct}
-                  onChange={(event) =>
-                    handleEditPropertyChange('optimisticMultiplierPct', event.target.value)
-                  }
-                />
-              </div>
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                Leave image or YouTube URL empty to clear those fields.
-              </p>
-              <div className="flex justify-end gap-2">
-                <button
-                  className="rounded-xl border border-slate-300 px-4 py-2 text-slate-700 dark:border-slate-600 dark:text-slate-200"
-                  onClick={() => {
-                    setShowEditPropertyModal(false);
-                    setEditingPropertyId('');
-                  }}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="bg-primary-600 text-white px-6 py-2 rounded-lg hover:bg-primary-700"
-                  onClick={handleSavePropertyEdits}
-                  disabled={!canManageOwnerFlows || !editingPropertyId}
-                >
-                  Save Changes
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showCreateProfitModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-3xl rounded-2xl border border-white/70 bg-white/90 p-6 shadow-2xl shadow-slate-300/40 dark:border-white/10 dark:bg-slate-900/90 dark:shadow-black/50">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-xl font-bold text-gray-900 dark:text-white">
-                Create Profit Distribution Intent
-              </h2>
-              <button
-                className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-700 dark:border-gray-600 dark:text-gray-200"
-                onClick={() => setShowCreateProfitModal(false)}
-              >
-                Close
-              </button>
-            </div>
-            <div className="mb-3 flex items-center justify-between">
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                Smart mode auto-fills distributor from selected property.
-              </p>
-              <button
-                className="text-xs border border-gray-300 dark:border-gray-600 px-3 py-1 rounded"
-                onClick={() => setShowProfitAdvanced((prev) => !prev)}
-              >
-                {showProfitAdvanced ? 'Hide Advanced' : 'Show Advanced'}
-              </button>
-            </div>
-            <div className={`grid gap-4 ${showProfitAdvanced ? 'md:grid-cols-3' : 'md:grid-cols-2'}`}>
-              <select
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                value={profitForm.propertyId}
-                onChange={(event) => handleProfitChange('propertyId', event.target.value)}
-              >
-                <option value="">Select property</option>
-                {properties.map((property) => (
-                  <option key={property.propertyId} value={property.propertyId}>
-                    {property.propertyId}
-                  </option>
-                ))}
-              </select>
-              {showProfitAdvanced && (
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Profit distributor address (0x...)"
-                  value={profitForm.profitDistributorAddress}
-                  onChange={(event) =>
-                    handleProfitChange('profitDistributorAddress', event.target.value)
-                  }
-                />
-              )}
-              <input
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="USDC amount"
-                value={profitForm.usdcAmount}
-                onChange={(event) => handleProfitChange('usdcAmount', event.target.value)}
-              />
-            </div>
-            {selectedProfitProperty && (
-              <div className="mt-2 rounded border border-gray-200 p-3 text-xs text-gray-600 dark:border-gray-700 dark:text-gray-300">
-                <div>Property: {selectedProfitProperty.propertyId}</div>
-                <div>Profit distributor: {selectedProfitProperty.profitDistributorAddress}</div>
-              </div>
-            )}
-            <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-              Creates `/v1/admin/profits/intents` for operator execution.
-            </p>
-            <div className="mt-3 rounded border border-gray-200 p-3 text-xs dark:border-gray-700">
-              <div className="font-semibold text-gray-700 dark:text-gray-200">Preflight Checks</div>
-              {profitChecksLoading && (
-                <div className="mt-2 text-gray-500 dark:text-gray-400">Loading checks...</div>
-              )}
-              {!profitChecksLoading && !profitPreflight && (
-                <div className="mt-2 text-gray-500 dark:text-gray-400">
-                  Select a property to load preflight checks.
-                </div>
-              )}
-              {profitPreflight && (
-                <div className="mt-2 space-y-1 text-gray-600 dark:text-gray-300">
-                  <div>Operator: {profitPreflight.operatorAddress ?? 'Not configured'}</div>
-                  <div>Distributor owner: {profitPreflight.distributorOwner}</div>
-                  <div>
-                    Balance/Allowance: {(Number(profitPreflight.operatorUsdcBalanceBaseUnits) / 1_000_000).toLocaleString()} /
-                    {(Number(profitPreflight.operatorAllowanceBaseUnits) / 1_000_000).toLocaleString()} USDC
-                  </div>
-                  <div>
-                    Checks:{' '}
-                    {[
-                      ['operatorConfigured', profitPreflight.checks.operatorConfigured],
-                      ['ownerMatchesOperator', profitPreflight.checks.ownerMatchesOperator],
-                      ['hasSufficientBalance', profitPreflight.checks.hasSufficientBalance],
-                      ['hasSufficientAllowance', profitPreflight.checks.hasSufficientAllowance],
-                      ['indexerHealthy', profitPreflight.checks.indexerHealthy],
-                      ['workersHealthy', profitPreflight.checks.workersHealthy],
-                    ]
-                      .map(([label, ok]) => `${ok ? 'OK' : 'FAIL'} ${label}`)
-                      .join(' | ')}
-                  </div>
-                </div>
-              )}
-              {profitFlowStatus && (
-                <div className="mt-3 border-t border-gray-200 pt-2 text-gray-600 dark:border-gray-700 dark:text-gray-300">
-                  <div className="font-semibold text-gray-700 dark:text-gray-200">Flow Status</div>
-                  <div className="mt-1">
-                    {[
-                      ['Intent Submitted', profitFlowStatus.flags.intentSubmitted],
-                      ['Intent Confirmed', profitFlowStatus.flags.intentConfirmed],
-                      ['Deposit Indexed', profitFlowStatus.flags.depositIndexed],
-                      ['Claimable Pool > 0', profitFlowStatus.flags.claimablePoolPositive],
-                    ]
-                      .map(([label, ok]) => `${ok ? 'OK' : 'PENDING'} ${label}`)
-                      .join(' -> ')}
-                  </div>
-                  <div className="mt-1">
-                    Unclaimed pool: {(Number(profitFlowStatus.unclaimedPoolBaseUnits) / 1_000_000).toLocaleString()} USDC
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className="mt-4 flex flex-wrap gap-2">
-              <button
-                className="border border-primary-600 px-4 py-2 rounded-lg text-primary-700 hover:bg-primary-50 disabled:opacity-60 disabled:cursor-not-allowed dark:text-primary-300 dark:hover:bg-primary-900/20"
-                onClick={handleApproveProfitAllowance}
-                disabled={
-                  !canManageOwnerFlows ||
-                  isApprovingProfitAllowance ||
-                  !profitForm.propertyId ||
-                  !effectiveProfitDistributorAddress ||
-                  !profitForm.usdcAmount
-                }
-              >
-                {isApprovingProfitAllowance ? 'Approving...' : 'Approve USDC Allowance'}
-              </button>
-              <button
-                className="rounded-xl bg-primary-600 px-4 py-2 text-white hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-60"
-                onClick={handleApproveAndSubmitProfitIntent}
-                disabled={
-                  !canManageOwnerFlows ||
-                  isApprovingProfitAllowance ||
-                  !profitPreflight ||
-                  !profitPreflight.checks.operatorConfigured ||
-                  !profitPreflight.checks.ownerMatchesOperator ||
-                  !profitPreflight.checks.hasSufficientBalance ||
-                  !profitPreflight.checks.indexerHealthy ||
-                  !profitPreflight.checks.workersHealthy
-                }
-              >
-                {isApprovingProfitAllowance ? 'Processing...' : 'Approve + Submit Intent'}
-              </button>
-              <button
-                className="bg-gray-900 text-white px-4 py-2 rounded-lg hover:bg-gray-700 disabled:opacity-60 disabled:cursor-not-allowed dark:bg-gray-700 dark:hover:bg-gray-600"
-                onClick={handleCreateProfitIntent}
-                disabled={
-                  !canManageOwnerFlows ||
-                  isApprovingProfitAllowance ||
-                  !profitPreflight ||
-                  !profitPreflight.checks.operatorConfigured ||
-                  !profitPreflight.checks.ownerMatchesOperator ||
-                  !profitPreflight.checks.hasSufficientBalance ||
-                  !profitPreflight.checks.indexerHealthy ||
-                  !profitPreflight.checks.workersHealthy
-                }
-              >
-                Submit Intent Only
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showPlatformFeeModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-3xl rounded-2xl border border-white/70 bg-white/90 p-6 shadow-2xl shadow-slate-300/40 dark:border-white/10 dark:bg-slate-900/90 dark:shadow-black/50">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-xl font-bold text-gray-900 dark:text-white">
-                Update Platform Fee (Intent)
-              </h2>
-              <button
-                className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-700 dark:border-gray-600 dark:text-gray-200"
-                onClick={() => setShowPlatformFeeModal(false)}
-              >
-                Close
-              </button>
-            </div>
-            <div className="mb-3 flex items-center justify-between">
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                Smart mode auto-fills from selected campaign.
-              </p>
-              <button
-                className="text-xs border border-gray-300 dark:border-gray-600 px-3 py-1 rounded"
-                onClick={() => setShowPlatformAdvanced((prev) => !prev)}
-              >
-                {showPlatformAdvanced ? 'Hide Advanced' : 'Show Advanced'}
-              </button>
-            </div>
-            <div className={`grid gap-4 ${showPlatformAdvanced ? 'md:grid-cols-3' : 'md:grid-cols-2'}`}>
-              <select
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                value={platformFeeForm.campaignAddress}
-                onChange={(event) => handleSelectPlatformCampaign(event.target.value)}
-              >
-                <option value="">Select campaign</option>
-                {campaigns.map((campaign) => (
-                  <option key={campaign.campaignAddress} value={campaign.campaignAddress}>
-                    {campaign.propertyId} ({campaign.campaignAddress.slice(0, 6)}...{campaign.campaignAddress.slice(-4)})
-                  </option>
-                ))}
-              </select>
-              <input
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                placeholder="Platform fee bps (0-2000)"
-                value={platformFeeForm.platformFeeBps}
-                onChange={(event) => handlePlatformFeeChange('platformFeeBps', event.target.value)}
-              />
-              {showPlatformAdvanced && (
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Fee recipient (required if bps > 0)"
-                  value={platformFeeForm.platformFeeRecipient}
-                  onChange={(event) =>
-                    handlePlatformFeeChange('platformFeeRecipient', event.target.value)
-                  }
-                />
-              )}
-            </div>
-            {selectedPlatformCampaign && (
-              <div className="mt-2 rounded border border-gray-200 p-3 text-xs text-gray-600 dark:border-gray-700 dark:text-gray-300">
-                <div>Property: {selectedPlatformCampaign.propertyId}</div>
-                <div>Campaign: {selectedPlatformCampaign.campaignAddress}</div>
-                <div>
-                  Current fee: {((selectedPlatformPreview?.platformFeeBps ?? 0) / 100).toFixed(2)}% /{' '}
-                  {selectedPlatformPreview?.platformFeeRecipient ??
-                    '0x0000000000000000000000000000000000000000'}
-                  {selectedPlatformPreview?.fromIntent && (
-                    <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/40 dark:text-amber-200">
-                      from intent
-                    </span>
-                  )}
-                </div>
-              </div>
-            )}
-            <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-              Creates `/v1/admin/platform-fees/intents` for operational execution. Select campaign first, then adjust bps/recipient.
-            </p>
-            <div className="mt-3 rounded border border-gray-200 p-3 text-xs dark:border-gray-700">
-              <div className="font-semibold text-gray-700 dark:text-gray-200">Preflight Checks</div>
-              {platformFeeChecksLoading && (
-                <div className="mt-2 text-gray-500 dark:text-gray-400">Loading checks...</div>
-              )}
-              {!platformFeeChecksLoading && !platformFeePreflight && (
-                <div className="mt-2 text-gray-500 dark:text-gray-400">
-                  Select campaign + fee details to load preflight checks.
-                </div>
-              )}
-              {platformFeePreflight && (
-                <div className="mt-2 space-y-1 text-gray-600 dark:text-gray-300">
-                  <div>Operator: {platformFeePreflight.operatorAddress ?? 'Not configured'}</div>
-                  <div>Campaign owner: {platformFeePreflight.contractOwner}</div>
-                  <div>
-                    Current Fee: {(platformFeePreflight.current.platformFeeBps / 100).toFixed(2)}% /{' '}
-                    {platformFeePreflight.current.platformFeeRecipient}
-                  </div>
-                  <div>
-                    Target Fee: {(platformFeePreflight.requested.platformFeeBps / 100).toFixed(2)}% /{' '}
-                    {platformFeePreflight.requested.platformFeeRecipient}
-                  </div>
-                  <div>
-                    Checks:{' '}
-                    {[
-                      ['operatorConfigured', platformFeePreflight.checks.operatorConfigured],
-                      ['ownerMatchesOperator', platformFeePreflight.checks.ownerMatchesOperator],
-                      ['recipientValid', platformFeePreflight.checks.recipientValid],
-                      ['alreadyApplied', platformFeePreflight.checks.alreadyApplied],
-                      ['indexerHealthy', platformFeePreflight.checks.indexerHealthy],
-                      ['workersHealthy', platformFeePreflight.checks.workersHealthy],
-                    ]
-                      .map(([label, ok]) => `${ok ? 'OK' : 'FAIL'} ${label}`)
-                      .join(' | ')}
-                  </div>
-                </div>
-              )}
-              {platformFeeFlowStatus && (
-                <div className="mt-3 border-t border-gray-200 pt-2 text-gray-600 dark:border-gray-700 dark:text-gray-300">
-                  <div className="font-semibold text-gray-700 dark:text-gray-200">Flow Status</div>
-                  <div className="mt-1">
-                    {[
-                      ['Intent Submitted', platformFeeFlowStatus.flags.intentSubmitted],
-                      ['Intent Confirmed', platformFeeFlowStatus.flags.intentConfirmed],
-                      ['Campaign Updated', platformFeeFlowStatus.flags.campaignMatchesTarget],
-                    ]
-                      .map(([label, ok]) => `${ok ? 'OK' : 'PENDING'} ${label}`)
-                      .join(' -> ')}
-                  </div>
-                </div>
-              )}
-            </div>
-            <div className="mt-4 flex justify-end gap-2">
-              <button
-                className="rounded-xl border border-slate-300 px-4 py-2 text-slate-700 dark:border-slate-600 dark:text-slate-200"
-                onClick={() => setShowPlatformFeeModal(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="bg-primary-600 text-white px-6 py-2 rounded-lg hover:bg-primary-700"
-                onClick={handleCreatePlatformFeeIntent}
-                disabled={
-                  !canManageOwnerFlows ||
-                  !hasPlatformFeeBasicsValid ||
-                  (platformFeePreflight ? !platformFeePreflight.checks.recipientValid : false)
-                }
-              >
-                Submit Platform Fee Intent
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showCombinedIntentModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-3xl rounded-2xl border border-white/70 bg-white/90 p-6 shadow-2xl shadow-slate-300/40 dark:border-white/10 dark:bg-slate-900/90 dark:shadow-black/50">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-xl font-bold text-gray-900 dark:text-white">
-                Combined Intent Submit
-              </h2>
-              <button
-                className="rounded border border-gray-300 px-3 py-1 text-sm text-gray-700 dark:border-gray-600 dark:text-gray-200"
-                onClick={() => setShowCombinedIntentModal(false)}
-              >
-                Close
-              </button>
-            </div>
-            <p className="mb-4 text-xs text-gray-500 dark:text-gray-400">
-              Pick one campaign and submit profit distribution + platform fee intents in one backend call.
-            </p>
-            <div className="grid gap-4 md:grid-cols-2">
-              <select
-                className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                value={combinedForm.campaignAddress}
-                onChange={(event) => handleSelectCombinedCampaign(event.target.value)}
-              >
-                <option value="">Select campaign</option>
-                {campaigns.map((campaign) => (
-                  <option key={campaign.campaignAddress} value={campaign.campaignAddress}>
-                    {campaign.propertyId} ({campaign.campaignAddress.slice(0, 6)}...{campaign.campaignAddress.slice(-4)})
-                  </option>
-                ))}
-              </select>
-              <div className="flex items-center gap-4 rounded border border-gray-200 px-4 py-2 dark:border-gray-700">
-                <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
-                  <input
-                    type="checkbox"
-                    checked={combinedForm.includeProfitIntent}
-                    onChange={(event) =>
-                      handleCombinedChange('includeProfitIntent', event.target.checked)
-                    }
-                  />
-                  Include Profit
-                </label>
-                <label className="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-200">
-                  <input
-                    type="checkbox"
-                    checked={combinedForm.includePlatformFeeIntent}
-                    onChange={(event) =>
-                      handleCombinedChange('includePlatformFeeIntent', event.target.checked)
-                    }
-                  />
-                  Include Platform Fee
-                </label>
-              </div>
-            </div>
-            {selectedCombinedCampaign && (
-              <div className="mt-3 rounded border border-gray-200 p-3 text-xs text-gray-600 dark:border-gray-700 dark:text-gray-300">
-                <div>Property: {selectedCombinedCampaign.propertyId}</div>
-                <div>Campaign: {selectedCombinedCampaign.campaignAddress}</div>
-              </div>
-            )}
-            {combinedForm.includeProfitIntent && (
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Profit amount (USDC)"
-                  value={combinedForm.profitUsdcAmount}
-                  onChange={(event) => handleCombinedChange('profitUsdcAmount', event.target.value)}
-                />
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Profit distributor (optional override)"
-                  value={combinedForm.profitDistributorAddress}
-                  onChange={(event) =>
-                    handleCombinedChange('profitDistributorAddress', event.target.value)
-                  }
-                />
-              </div>
-            )}
-            {combinedForm.includePlatformFeeIntent && (
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Platform fee bps (0-2000)"
-                  value={combinedForm.platformFeeBps}
-                  onChange={(event) => handleCombinedChange('platformFeeBps', event.target.value)}
-                />
-                <input
-                  className="w-full px-4 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-                  placeholder="Fee recipient (optional override)"
-                  value={combinedForm.platformFeeRecipient}
-                  onChange={(event) =>
-                    handleCombinedChange('platformFeeRecipient', event.target.value)
-                  }
-                />
-              </div>
-            )}
-            <div className="mt-4 flex justify-end gap-2">
-              <button
-                className="rounded-xl border border-slate-300 px-4 py-2 text-slate-700 dark:border-slate-600 dark:text-slate-200"
-                onClick={() => setShowCombinedIntentModal(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="bg-primary-600 text-white px-6 py-2 rounded-lg hover:bg-primary-700 disabled:opacity-60 disabled:cursor-not-allowed"
-                onClick={handleCreateCombinedIntentBatch}
-                disabled={!canManageOwnerFlows || !combinedForm.campaignAddress}
-              >
-                Submit Combined Intent
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {(statusMessage || errorMessage) && (
-        <div
-          className={`mb-6 rounded-lg px-4 py-3 ${
-            errorMessage
-              ? 'bg-red-50 text-red-700 dark:bg-red-900/40 dark:text-red-200'
-              : 'bg-green-50 text-green-700 dark:bg-green-900/40 dark:text-green-200'
-          }`}
-        >
-          {errorMessage || statusMessage}
-        </div>
-      )}
-      {combinedToasts.length > 0 && (
-        <div className="mb-6 space-y-2">
-          {combinedToasts.map((toast) => (
+          {/* Status Messages */}
+          {(statusMessage || errorMessage) && (
             <div
-              key={toast.id}
-              className={`rounded-lg px-4 py-2 text-sm ${
-                toast.tone === 'success'
-                  ? 'bg-green-50 text-green-700 dark:bg-green-900/40 dark:text-green-200'
-                  : 'bg-amber-50 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200'
+              className={`mb-6 rounded-lg border px-4 py-3 backdrop-blur ${
+                errorMessage
+                  ? 'border-red-500/30 bg-red-500/10 text-red-200'
+                  : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
               }`}
             >
-              {toast.text}
+              {errorMessage || statusMessage}
             </div>
-          ))}
-        </div>
-      )}
+          )}
 
-      {canViewOwnerConsole && (
-      <>
-      {/* Property Catalog */}
-      <div className="rounded-2xl border border-white/70 bg-white/85 p-6 shadow-xl shadow-slate-200/35 dark:border-white/10 dark:bg-slate-900/70 dark:shadow-black/35 mb-8">
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-xl font-bold text-gray-900 dark:text-white">Property Catalog</h2>
-          <div className="flex items-center gap-2">
-            <button
-              className="text-sm border border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-300 px-3 py-1 rounded disabled:opacity-60 disabled:cursor-not-allowed"
-              onClick={() => void handleBulkArchiveSelectedProperties()}
-              disabled={!canManageOwnerFlows || !hasSelection || bulkPropertyActionLoading !== null}
-            >
-              {bulkPropertyActionLoading === 'archive' ? 'Archiving...' : 'Archive Selected'}
-            </button>
-            <button
-              className="text-sm border border-green-300 text-green-700 dark:border-green-700 dark:text-green-300 px-3 py-1 rounded disabled:opacity-60 disabled:cursor-not-allowed"
-              onClick={() => void handleBulkRestoreSelectedProperties()}
-              disabled={!canManageOwnerFlows || !hasSelection || bulkPropertyActionLoading !== null}
-            >
-              {bulkPropertyActionLoading === 'restore' ? 'Restoring...' : 'Restore Selected'}
-            </button>
-            <button
-              className="text-sm border border-gray-300 dark:border-gray-600 px-3 py-1 rounded"
-              onClick={() => void loadAdminProperties(token)}
-              disabled={!canManageOwnerFlows || propertyCatalogLoading}
-            >
-              {propertyCatalogLoading ? 'Refreshing...' : 'Refresh'}
-            </button>
-          </div>
-        </div>
-        <div className="mb-4 grid gap-3 md:grid-cols-3">
-          <input
-            className="px-3 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-            placeholder="Search by propertyId, name, location"
-            value={propertyCatalogQuery}
-            onChange={(event) => setPropertyCatalogQuery(event.target.value)}
-          />
-          <select
-            className="px-3 py-2 border rounded-lg dark:bg-gray-700 dark:border-gray-600"
-            value={propertyCatalogStatusFilter}
-            onChange={(event) =>
-              setPropertyCatalogStatusFilter(event.target.value as 'all' | 'active' | 'archived')
-            }
-          >
-            <option value="all">All statuses</option>
-            <option value="active">Active only</option>
-            <option value="archived">Archived only</option>
-          </select>
-          <div className="flex items-center text-xs text-gray-500 dark:text-gray-400">
-            Selected: {selectedPropertyIds.length} / Filtered: {filteredAdminProperties.length}
-          </div>
-        </div>
-        {propertyCatalogLoading ? (
-          <p className="text-gray-500 dark:text-gray-400">Loading properties...</p>
-        ) : adminProperties.length === 0 ? (
-          <p className="text-gray-500 dark:text-gray-400">No properties found.</p>
-        ) : filteredAdminProperties.length === 0 ? (
-          <p className="text-gray-500 dark:text-gray-400">No properties match your filters.</p>
-        ) : (
-          <div className="overflow-hidden rounded border border-gray-200 dark:border-gray-700">
-            <div className="max-h-80 overflow-auto">
-              <table className="min-w-full text-sm">
-                <thead className="sticky top-0 z-10 bg-gray-50 dark:bg-gray-900/90">
-                  <tr className="text-left text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                    <th className="px-3 py-2 font-semibold">
-                      <input
-                        type="checkbox"
-                        checked={allFilteredSelected}
-                        onChange={toggleSelectAllFilteredProperties}
-                      />
-                    </th>
-                    <th className="px-3 py-2 font-semibold">Property</th>
-                    <th className="px-3 py-2 font-semibold">Status</th>
-                    <th className="px-3 py-2 font-semibold">Location</th>
-                    <th className="px-3 py-2 font-semibold text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                  {filteredAdminProperties.map((property) => {
-                    const isArchived = !!property.archivedAt;
-                    const isLoading = propertyActionLoadingId === property.propertyId;
-                    return (
-                      <tr key={property.propertyId} className="text-gray-900 dark:text-gray-100">
-                        <td className="px-3 py-2 align-middle">
-                          <input
-                            type="checkbox"
-                            checked={selectedPropertyIds.includes(property.propertyId)}
-                            onChange={() => togglePropertySelection(property.propertyId)}
-                          />
-                        </td>
-                        <td className="px-3 py-2 align-middle">
-                          <div className="font-medium">{property.propertyId}</div>
-                          <div className="text-xs text-gray-500 dark:text-gray-400">{property.name}</div>
-                          <div className="text-[11px] text-gray-500 dark:text-gray-400">
-                            Target ${(Number(property.targetUsdcBaseUnits) / 1_000_000).toLocaleString()}
-                            {' '}| Est. Sell{' '}
-                            {property.estimatedSellUsdcBaseUnits
-                              ? `$${(Number(property.estimatedSellUsdcBaseUnits) / 1_000_000).toLocaleString()}`
-                              : 'N/A'}
-                          </div>
-                        </td>
-                        <td className="px-3 py-2 align-middle">
-                          <span
-                            className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
-                              isArchived
-                                ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200'
-                                : 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-200'
-                            }`}
-                          >
-                            {isArchived ? 'Archived' : 'Active'}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2 align-middle">{property.location || 'N/A'}</td>
-                        <td className="px-3 py-2 align-middle text-right">
-                          <div className="flex items-center justify-end gap-2">
-                            <button
-                              className="rounded border border-gray-300 px-2 py-1 text-xs dark:border-gray-600"
-                              onClick={() => openEditPropertyModal(property)}
-                              disabled={!canManageOwnerFlows || isLoading}
-                            >
-                              Edit
-                            </button>
-                            {isArchived ? (
-                              <button
-                                className="rounded border border-green-500 px-2 py-1 text-xs text-green-700 dark:text-green-300"
-                                onClick={() => void handleRestoreProperty(property.propertyId)}
-                                disabled={!canManageOwnerFlows || isLoading}
-                              >
-                                {isLoading ? 'Restoring...' : 'Restore'}
-                              </button>
-                            ) : (
-                              <button
-                                className="rounded border border-amber-500 px-2 py-1 text-xs text-amber-700 dark:text-amber-300"
-                                onClick={() => void handleArchiveProperty(property.propertyId)}
-                                disabled={!canManageOwnerFlows || isLoading}
-                              >
-                                {isLoading ? 'Archiving...' : 'Archive'}
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Campaign Overview */}
-      <div className="rounded-2xl border border-white/70 bg-white/85 p-6 shadow-xl shadow-slate-200/35 dark:border-white/10 dark:bg-slate-900/70 dark:shadow-black/35">
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-xl font-bold text-gray-900 dark:text-white">Campaign Fee Overview</h2>
-          <div className="flex items-center gap-2">
-            {recentCampaigns.length > 2 && (
-              <button
-                className="text-sm border border-gray-300 dark:border-gray-600 px-3 py-1 rounded"
-                onClick={() => setShowAllCampaignOverview((prev) => !prev)}
-              >
-                {showAllCampaignOverview ? 'Show latest 2' : `View all (${recentCampaigns.length})`}
-              </button>
-            )}
-            <button
-              className="text-sm border border-gray-300 dark:border-gray-600 px-3 py-1 rounded"
-              onClick={() => void loadCampaigns()}
-            >
-              Refresh
-            </button>
-          </div>
-        </div>
-        {campaignsLoading ? (
-          <p className="text-gray-500 dark:text-gray-400">Loading campaigns...</p>
-        ) : campaigns.length === 0 ? (
-          <p className="text-gray-500 dark:text-gray-400">No campaigns indexed yet.</p>
-        ) : (
-          <div className="overflow-hidden rounded border border-gray-200 dark:border-gray-700">
-            <div className="max-h-72 overflow-auto">
-              <table className="min-w-full text-sm">
-                <thead className="sticky top-0 z-10 bg-gray-50 dark:bg-gray-900/90">
-                  <tr className="text-left text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                    <th className="px-3 py-2 font-semibold">Property</th>
-                    <th className="px-3 py-2 font-semibold">Fee</th>
-                    <th className="px-3 py-2 font-semibold">Recipient</th>
-                    <th className="px-3 py-2 font-semibold text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                  {visibleCampaigns.map((campaign) => {
-                    const propertyMeta = properties.find(
-                      (property) => property.propertyId === campaign.propertyId
-                    );
-                    const profitDistributorAddress = propertyMeta?.profitDistributorAddress || '';
-                    const fallbackIntent = latestPlatformFeeIntentByCampaign.get(
-                      campaign.campaignAddress.toLowerCase()
-                    );
-                    const resolvedFeeBps =
-                      campaign.platformFeeBps ?? fallbackIntent?.platformFeeBps ?? null;
-                    const resolvedRecipient =
-                      campaign.platformFeeRecipient ??
-                      fallbackIntent?.platformFeeRecipient ??
-                      null;
-                    const feeRecipient = resolvedRecipient ?? 'Not set';
-                    const shortRecipient =
-                      feeRecipient.length > 16
-                        ? `${feeRecipient.slice(0, 10)}...${feeRecipient.slice(-4)}`
-                        : feeRecipient;
-
-                    return (
-                      <tr key={campaign.campaignAddress} className="text-gray-900 dark:text-gray-100">
-                        <td className="px-3 py-2 align-middle">
-                          <div className="font-medium">{campaign.propertyId}</div>
-                          <div className="font-mono text-[11px] text-gray-500 dark:text-gray-400">
-                            {campaign.campaignAddress.slice(0, 8)}...{campaign.campaignAddress.slice(-4)}
-                          </div>
-                        </td>
-                        <td className="px-3 py-2 align-middle">
-                          {resolvedFeeBps === null ? 'Not available' : `${(resolvedFeeBps / 100).toFixed(2)}%`}
-                        </td>
-                        <td className="px-3 py-2 align-middle font-mono text-xs" title={feeRecipient}>
-                          {shortRecipient}
-                          {campaign.platformFeeRecipient === null && fallbackIntent?.platformFeeRecipient && (
-                            <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/40 dark:text-amber-200">
-                              from intent
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2 align-middle text-right">
-                          <button
-                            className="rounded border border-primary-600 px-2 py-1 text-xs text-primary-700 hover:bg-primary-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-primary-300 dark:hover:bg-primary-900/20"
-                            onClick={() =>
-                              void handleQuickProfitIntent(campaign.propertyId, profitDistributorAddress)
-                            }
-                            disabled={!canManageOwnerFlows || !profitDistributorAddress}
-                          >
-                            Deposit 10 USDC
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="mt-8 bg-white p-6 rounded-lg shadow-lg dark:bg-gray-800">
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-xl font-bold text-gray-900 dark:text-white">Recent Combined Submissions</h2>
-          <div className="flex items-center gap-2">
-            {combinedHistory.length > 2 && (
-              <button
-                className="text-sm border border-gray-300 dark:border-gray-600 px-3 py-1 rounded disabled:opacity-60 disabled:cursor-not-allowed"
-                onClick={() => setShowAllCombinedSubmissions((prev) => !prev)}
-                disabled={bulkRetryLoadingScope !== null || bulkResetLoadingScope !== null}
-              >
-                {showAllCombinedSubmissions
-                  ? 'Show latest 2'
-                  : `View all (${combinedHistory.length})`}
-              </button>
-            )}
-            <button
-              className="text-sm border border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-300 px-3 py-1 rounded disabled:opacity-60 disabled:cursor-not-allowed"
-              onClick={() => {
-                const targets = combinedHistory.flatMap((record) => {
-                  const rowTargets: Array<{ intentType: IntentType; intentId: string }> = [];
-                  const profitIntent = record.profitIntentId
-                    ? profitIntentById.get(record.profitIntentId)
-                    : null;
-                  const platformIntent = record.platformFeeIntentId
-                    ? platformFeeIntentById.get(record.platformFeeIntentId)
-                    : null;
-                  if (record.includeProfitIntent && profitIntent?.status === 'failed') {
-                    rowTargets.push({ intentType: 'profit', intentId: profitIntent.id });
-                  }
-                  if (record.includePlatformFeeIntent && platformIntent?.status === 'failed') {
-                    rowTargets.push({ intentType: 'platformFee', intentId: platformIntent.id });
-                  }
-                  return rowTargets;
-                });
-                void handleRetryFailedIntents(targets, 'global');
-              }}
-              disabled={
-                !canManageOwnerFlows ||
-                combinedHistory.length === 0 ||
-                bulkRetryLoadingScope !== null
-              }
-            >
-              {bulkRetryLoadingScope === 'global' ? 'Retrying Failed...' : 'Retry All Failed'}
-            </button>
-            <button
-              className="text-sm border border-amber-300 text-amber-700 dark:border-amber-700 dark:text-amber-300 px-3 py-1 rounded disabled:opacity-60 disabled:cursor-not-allowed"
-              onClick={() => {
-                const targets = combinedHistory.flatMap((record) => {
-                  const rowTargets: Array<{ intentType: IntentType; intentId: string }> = [];
-                  const profitIntent = record.profitIntentId
-                    ? profitIntentById.get(record.profitIntentId)
-                    : null;
-                  const platformIntent = record.platformFeeIntentId
-                    ? platformFeeIntentById.get(record.platformFeeIntentId)
-                    : null;
-                  if (record.includeProfitIntent && profitIntent?.status === 'failed') {
-                    rowTargets.push({ intentType: 'profit', intentId: profitIntent.id });
-                  }
-                  if (record.includePlatformFeeIntent && platformIntent?.status === 'failed') {
-                    rowTargets.push({ intentType: 'platformFee', intentId: platformIntent.id });
-                  }
-                  return rowTargets;
-                });
-                void handleResetFailedIntents(targets, 'global');
-              }}
-              disabled={
-                !canManageOwnerFlows ||
-                combinedHistory.length === 0 ||
-                bulkRetryLoadingScope !== null ||
-                bulkResetLoadingScope !== null
-              }
-            >
-              {bulkResetLoadingScope === 'global' ? 'Resetting Failed...' : 'Reset All Failed'}
-            </button>
-            <button
-              className="text-sm border border-gray-300 dark:border-gray-600 px-3 py-1 rounded disabled:opacity-60 disabled:cursor-not-allowed"
-              onClick={() => void handleRefreshCombinedStatuses()}
-              disabled={
-                !canManageOwnerFlows ||
-                combinedHistory.length === 0 ||
-                combinedProgressLoading ||
-                bulkRetryLoadingScope !== null ||
-                bulkResetLoadingScope !== null
-              }
-            >
-              {combinedProgressLoading ? 'Refreshing...' : 'Refresh Status Now'}
-            </button>
-            <button
-              className="text-sm border border-red-300 text-red-700 dark:border-red-700 dark:text-red-300 px-3 py-1 rounded disabled:opacity-60 disabled:cursor-not-allowed"
-              onClick={clearCombinedHistory}
-              disabled={
-                combinedHistory.length === 0 ||
-                bulkRetryLoadingScope !== null ||
-                bulkResetLoadingScope !== null
-              }
-            >
-              Clear History
-            </button>
-          </div>
-        </div>
-        {combinedHistory.length === 0 ? (
-          <p className="text-sm text-gray-500 dark:text-gray-400">No combined submissions yet.</p>
-        ) : (
-          <div className="space-y-3">
-            {visibleCombinedHistory.map((record) => {
-              const profitIntent = record.profitIntentId
-                ? profitIntentById.get(record.profitIntentId)
-                : null;
-              const platformIntent = record.platformFeeIntentId
-                ? platformFeeIntentById.get(record.platformFeeIntentId)
-                : null;
-              const progress = combinedProgress[record.id];
-              const flowReady = record.includeProfitIntent ? progress ?? null : null;
-              const profitStatus = profitIntent?.status ?? flowReady?.profitIntentStatus ?? null;
-              const platformStatus =
-                platformIntent?.status ?? flowReady?.platformFeeIntentStatus ?? null;
-              const rowOutcome = getCombinedOutcome(record);
-              const rowCompleted = rowOutcome === 'completed';
-              const rowHasError = rowOutcome === 'needs_attention';
-
-              return (
+          {/* Toast Notifications */}
+          {combinedToasts.length > 0 && (
+            <div className="mb-6 space-y-2">
+              {combinedToasts.map((toast) => (
                 <div
-                  key={record.id}
-                  className="rounded border border-gray-200 p-3 text-sm dark:border-gray-700"
+                  key={toast.id}
+                  className={`rounded-lg border px-4 py-2 text-sm backdrop-blur ${
+                    toast.tone === 'success'
+                      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                      : 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+                  }`}
                 >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="font-medium text-gray-900 dark:text-white">
-                      {record.propertyId}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`text-xs px-2 py-1 rounded ${
-                          rowHasError
-                            ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-200'
-                            : rowCompleted
-                              ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-200'
-                              : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/40 dark:text-yellow-200'
-                        }`}
+                  {toast.text}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Modal: Create Property */}
+          {showCreatePropertyModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+              <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-white/10 bg-slate-900/95 p-6 shadow-2xl shadow-black/50 backdrop-blur">
+                <div className="sticky top-0 z-10 -mx-6 -mt-6 mb-4 flex items-center justify-between border-b border-white/10 bg-slate-900/80 px-6 py-4 backdrop-blur">
+                  <h2 className="text-xl font-bold text-white">Create Property</h2>
+                  <button
+                    className="rounded-lg border border-slate-600 px-3 py-1 text-sm text-slate-200 hover:bg-slate-800/70"
+                    onClick={() => {
+                      setShowCreatePropertyModal(false);
+                      setPropertyImageFile(null);
+                      setPropertyImageUploadProgress(0);
+                      setPropertyImageUploadState('idle');
+                      setPropertyImageUploadDebug('');
+                    }}
+                  >
+                    Close
+                  </button>
+                </div>
+                <div className="space-y-4">
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Property name"
+                    value={propertyForm.name}
+                    onChange={(event) => handlePropertyChange('name', event.target.value)}
+                  />
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Property ID (optional)"
+                    value={propertyForm.propertyId}
+                    onChange={(event) => handlePropertyChange('propertyId', event.target.value)}
+                  />
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Location"
+                    value={propertyForm.location}
+                    onChange={(event) => handlePropertyChange('location', event.target.value)}
+                  />
+                  <textarea
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Description"
+                    rows={3}
+                    value={propertyForm.description}
+                    onChange={(event) => handlePropertyChange('description', event.target.value)}
+                  />
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Image URL (optional)"
+                    value={propertyForm.imageUrl}
+                    onChange={(event) => handlePropertyChange('imageUrl', event.target.value)}
+                  />
+                  <textarea
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Gallery image URLs (one per line, optional)"
+                    rows={3}
+                    value={propertyForm.imageUrlsText}
+                    onChange={(event) => handlePropertyChange('imageUrlsText', event.target.value)}
+                  />
+                  <div className="rounded-lg border border-dashed border-slate-600 p-3">
+                    <p className="mb-2 text-xs text-slate-400">Or upload image directly to Cloudinary</p>
+                    <div className="flex flex-col gap-2 md:flex-row md:items-center">
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/gif"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0] ?? null;
+                          setPropertyImageFile(file);
+                        }}
+                        className="text-sm text-slate-200"
+                      />
+                      <button
+                        type="button"
+                        className="rounded-lg border border-emerald-500/60 px-4 py-2 text-sm font-medium text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-60 transition-all"
+                        onClick={handleUploadPropertyImage}
+                        disabled={!propertyImageFile || isUploadingPropertyImage || !canManageOwnerFlows}
                       >
-                        {rowHasError ? 'Needs Attention' : rowCompleted ? 'Completed' : 'In Progress'}
-                      </span>
-                      <div className="text-xs text-gray-500 dark:text-gray-400">
-                        {new Date(record.createdAt).toLocaleString()}
+                        {isUploadingPropertyImage ? 'Uploading...' : 'Upload Image'}
+                      </button>
+                    </div>
+                    {propertyImageFile && (
+                      <p className="mt-2 text-xs text-slate-400">
+                        Selected: {propertyImageFile.name} ({(propertyImageFile.size / 1024).toFixed(1)} KB)
+                      </p>
+                    )}
+                    {isUploadingPropertyImage && (
+                      <div className="mt-2">
+                        <div className="h-2 w-full overflow-hidden rounded-full bg-slate-700">
+                          <div
+                            className="h-full bg-gradient-to-r from-blue-500 to-emerald-500 transition-all"
+                            style={{ width: `${propertyImageUploadProgress}%` }}
+                          />
+                        </div>
+                        <p className="mt-1 text-xs text-slate-400">Upload progress: {propertyImageUploadProgress}%</p>
                       </div>
-                    </div>
+                    )}
                   </div>
-                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                    Campaign: {record.campaignAddress}
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="YouTube URL (optional)"
+                    value={propertyForm.youtubeEmbedUrl}
+                    onChange={(event) => handlePropertyChange('youtubeEmbedUrl', event.target.value)}
+                  />
+                  <div className="grid grid-cols-2 gap-4">
+                    <input
+                      className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                      placeholder="Target raise (USDC)"
+                      value={propertyForm.targetUsdc}
+                      onChange={(event) => handlePropertyChange('targetUsdc', event.target.value)}
+                    />
+                    <input
+                      className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                      placeholder="Estimated sell price (USDC)"
+                      value={propertyForm.estimatedSellUsdc}
+                      onChange={(event) =>
+                        handlePropertyChange('estimatedSellUsdc', event.target.value)
+                      }
+                    />
                   </div>
-                  <div className="mt-2 text-xs text-gray-700 dark:text-gray-200">
-                    {[
-                      record.includeProfitIntent
-                        ? `Profit Intent: ${
-                            profitStatus === 'confirmed'
-                              ? 'OK'
-                              : profitStatus === 'failed'
-                                ? 'FAILED'
-                                : 'PENDING'
-                          }`
-                        : 'Profit Intent: N/A',
-                      record.includePlatformFeeIntent
-                        ? `Platform Fee Intent: ${
-                            platformStatus === 'confirmed'
-                              ? 'OK'
-                              : platformStatus === 'failed'
-                                ? 'FAILED'
-                                : 'PENDING'
-                          }`
-                        : 'Platform Fee Intent: N/A',
-                      record.includePlatformFeeIntent
-                        ? `Campaign Updated: ${
-                            flowReady?.campaignMatchesTarget === true
-                              ? 'OK'
-                              : flowReady?.campaignMatchesTarget === false
-                                ? 'PENDING'
-                                : 'N/A'
-                          }`
-                        : 'Campaign Updated: N/A',
-                      record.includeProfitIntent
-                        ? `Profit Deposit Indexed: ${
-                            flowReady?.profitDepositIndexed === true
-                              ? 'OK'
-                              : flowReady?.profitDepositIndexed === false
-                                ? 'PENDING'
-                                : 'N/A'
-                          }`
-                        : 'Profit Deposit Indexed: N/A',
-                      record.includeProfitIntent
-                        ? `Claimable Pool > 0: ${
-                            flowReady?.claimablePoolPositive === true
-                              ? 'OK'
-                              : flowReady?.claimablePoolPositive === false
-                                ? 'PENDING'
-                                : 'N/A'
-                          }`
-                        : 'Claimable Pool > 0: N/A',
-                    ].join(' | ')}
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                    <input
+                      className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                      placeholder="Conservative sell (USDC)"
+                      value={propertyForm.conservativeSellUsdc}
+                      onChange={(event) =>
+                        handlePropertyChange('conservativeSellUsdc', event.target.value)
+                      }
+                    />
+                    <input
+                      className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                      placeholder="Base sell (USDC)"
+                      value={propertyForm.baseSellUsdc}
+                      onChange={(event) => handlePropertyChange('baseSellUsdc', event.target.value)}
+                    />
+                    <input
+                      className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                      placeholder="Optimistic sell (USDC)"
+                      value={propertyForm.optimisticSellUsdc}
+                      onChange={(event) =>
+                        handlePropertyChange('optimisticSellUsdc', event.target.value)
+                      }
+                    />
                   </div>
-                  {record.includeProfitIntent && flowReady?.unclaimedPoolBaseUnits && (
-                    <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                      Unclaimed pool: {(
-                        Number(flowReady.unclaimedPoolBaseUnits) / 1_000_000
-                      ).toLocaleString()}{' '}
-                      USDC
-                    </div>
-                  )}
-                  <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
-                    {profitIntent?.txHash && (
-                      <a
-                        href={basescanTxUrl(profitIntent.txHash)}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-primary-600 hover:underline dark:text-primary-300"
-                      >
-                        Profit Tx
-                      </a>
-                    )}
-                    {platformIntent?.txHash && (
-                      <a
-                        href={basescanTxUrl(platformIntent.txHash)}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-primary-600 hover:underline dark:text-primary-300"
-                      >
-                        Platform Fee Tx
-                      </a>
-                    )}
-                    {record.includeProfitIntent && profitIntent?.status === 'failed' && (
-                      <>
-                        <button
-                          className="rounded border border-blue-300 px-2 py-1 text-blue-700 hover:bg-blue-50 disabled:opacity-50 dark:border-blue-700 dark:text-blue-300 dark:hover:bg-blue-900/20"
-                          onClick={() => void handleIntentAction('retry', 'profit', profitIntent.id)}
-                          disabled={
-                            !canManageOwnerFlows ||
-                            intentActionLoadingKey === `retry:profit:${profitIntent.id}`
-                          }
-                        >
-                          {intentActionLoadingKey === `retry:profit:${profitIntent.id}`
-                            ? 'Retrying Profit...'
-                            : 'Retry Profit'}
-                        </button>
-                        <button
-                          className="rounded border border-gray-300 px-2 py-1 text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700/40"
-                          onClick={() => void handleIntentAction('reset', 'profit', profitIntent.id)}
-                          disabled={
-                            !canManageOwnerFlows ||
-                            intentActionLoadingKey === `reset:profit:${profitIntent.id}`
-                          }
-                        >
-                          {intentActionLoadingKey === `reset:profit:${profitIntent.id}`
-                            ? 'Resetting Profit...'
-                            : 'Reset Profit'}
-                        </button>
-                      </>
-                    )}
-                    {record.includePlatformFeeIntent && platformIntent?.status === 'failed' && (
-                      <>
-                        <button
-                          className="rounded border border-blue-300 px-2 py-1 text-blue-700 hover:bg-blue-50 disabled:opacity-50 dark:border-blue-700 dark:text-blue-300 dark:hover:bg-blue-900/20"
-                          onClick={() =>
-                            void handleIntentAction('retry', 'platformFee', platformIntent.id)
-                          }
-                          disabled={
-                            !canManageOwnerFlows ||
-                            intentActionLoadingKey === `retry:platformFee:${platformIntent.id}`
-                          }
-                        >
-                          {intentActionLoadingKey === `retry:platformFee:${platformIntent.id}`
-                            ? 'Retrying Platform Fee...'
-                            : 'Retry Platform Fee'}
-                        </button>
-                        <button
-                          className="rounded border border-gray-300 px-2 py-1 text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700/40"
-                          onClick={() =>
-                            void handleIntentAction('reset', 'platformFee', platformIntent.id)
-                          }
-                          disabled={
-                            !canManageOwnerFlows ||
-                            intentActionLoadingKey === `reset:platformFee:${platformIntent.id}`
-                          }
-                        >
-                          {intentActionLoadingKey === `reset:platformFee:${platformIntent.id}`
-                            ? 'Resetting Platform Fee...'
-                            : 'Reset Platform Fee'}
-                        </button>
-                      </>
-                    )}
-                    {(profitIntent?.status === 'failed' || platformIntent?.status === 'failed') && (
-                      <>
-                        <button
-                          className="rounded border border-blue-300 px-2 py-1 text-blue-700 hover:bg-blue-50 disabled:opacity-50 dark:border-blue-700 dark:text-blue-300 dark:hover:bg-blue-900/20"
-                          onClick={() => {
-                            const targets: Array<{ intentType: IntentType; intentId: string }> = [];
-                            if (record.includeProfitIntent && profitIntent?.status === 'failed') {
-                              targets.push({ intentType: 'profit', intentId: profitIntent.id });
-                            }
-                            if (
-                              record.includePlatformFeeIntent &&
-                              platformIntent?.status === 'failed'
-                            ) {
-                              targets.push({
-                                intentType: 'platformFee',
-                                intentId: platformIntent.id,
-                              });
-                            }
-                            void handleRetryFailedIntents(targets, record.id);
-                          }}
-                          disabled={
-                            !canManageOwnerFlows ||
-                            bulkRetryLoadingScope !== null ||
-                            bulkResetLoadingScope !== null
-                          }
-                        >
-                          {bulkRetryLoadingScope === record.id
-                            ? 'Retrying Row Failed...'
-                            : 'Retry Row Failed'}
-                        </button>
-                        <button
-                          className="rounded border border-amber-300 px-2 py-1 text-amber-700 hover:bg-amber-50 disabled:opacity-50 dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-900/20"
-                          onClick={() => {
-                            const targets: Array<{ intentType: IntentType; intentId: string }> = [];
-                            if (record.includeProfitIntent && profitIntent?.status === 'failed') {
-                              targets.push({ intentType: 'profit', intentId: profitIntent.id });
-                            }
-                            if (
-                              record.includePlatformFeeIntent &&
-                              platformIntent?.status === 'failed'
-                            ) {
-                              targets.push({
-                                intentType: 'platformFee',
-                                intentId: platformIntent.id,
-                              });
-                            }
-                            void handleResetFailedIntents(targets, record.id);
-                          }}
-                          disabled={
-                            !canManageOwnerFlows ||
-                            bulkRetryLoadingScope !== null ||
-                            bulkResetLoadingScope !== null
-                          }
-                        >
-                          {bulkResetLoadingScope === record.id
-                            ? 'Resetting Row Failed...'
-                            : 'Reset Row Failed'}
-                        </button>
-                      </>
-                    )}
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                    <input
+                      className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                      placeholder="Conservative multiplier %"
+                      value={propertyForm.conservativeMultiplierPct}
+                      onChange={(event) =>
+                        handlePropertyChange('conservativeMultiplierPct', event.target.value)
+                      }
+                    />
+                    <input
+                      className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                      placeholder="Base multiplier %"
+                      value={propertyForm.baseMultiplierPct}
+                      onChange={(event) => handlePropertyChange('baseMultiplierPct', event.target.value)}
+                    />
+                    <input
+                      className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                      placeholder="Optimistic multiplier %"
+                      value={propertyForm.optimisticMultiplierPct}
+                      onChange={(event) =>
+                        handlePropertyChange('optimisticMultiplierPct', event.target.value)
+                      }
+                    />
+                  </div>
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <label className="text-sm text-slate-300">
+                      Campaign Start
+                      <input
+                        type="datetime-local"
+                        className="mt-1 w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                        value={propertyForm.startTime}
+                        onChange={(event) => handlePropertyChange('startTime', event.target.value)}
+                      />
+                    </label>
+                    <label className="text-sm text-slate-300">
+                      Campaign End
+                      <input
+                        type="datetime-local"
+                        className="mt-1 w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                        value={propertyForm.endTime}
+                        onChange={(event) => handlePropertyChange('endTime', event.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <div className="sticky bottom-0 z-10 -mx-6 -mb-6 flex justify-end gap-2 border-t border-white/10 bg-slate-900/80 px-6 py-4 backdrop-blur">
                     <button
-                      className="border border-gray-300 dark:border-gray-600 px-2 py-1 rounded"
-                      onClick={() => void handleRefreshCombinedStatuses()}
+                      className="rounded-lg border border-slate-600 px-4 py-2 text-slate-200 hover:bg-slate-800/60 transition-all"
+                      onClick={() => {
+                        setShowCreatePropertyModal(false);
+                        setPropertyImageFile(null);
+                        setPropertyImageUploadProgress(0);
+                        setPropertyImageUploadState('idle');
+                        setPropertyImageUploadDebug('');
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="rounded-lg bg-gradient-to-r from-emerald-600 to-emerald-500 px-6 py-2 text-white font-medium hover:shadow-lg hover:shadow-emerald-500/30 disabled:opacity-60 transition-all"
+                      onClick={handleCreateProperty}
                       disabled={
-                        combinedProgressLoading ||
-                        bulkRetryLoadingScope !== null ||
-                        bulkResetLoadingScope !== null
+                        !canManageOwnerFlows ||
+                        isUploadingPropertyImage ||
+                        Boolean(propertyImageFile && !propertyForm.imageUrl.trim())
                       }
                     >
-                      Refresh
+                      Create Property Intent
                     </button>
                   </div>
-                  {progress?.error && (
-                    <div className="mt-1 text-xs text-red-600 dark:text-red-300">
-                      {progress.error}
-                    </div>
-                  )}
                 </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      <div className="mt-8 grid gap-6 lg:grid-cols-3">
-        <div className="lg:col-span-3 flex items-center justify-between gap-3">
-          <div className="text-xs text-gray-500 dark:text-gray-400">
-            Indexer:{' '}
-            {adminMetrics?.indexer?.byChain?.length
-              ? adminMetrics.indexer.byChain
-                  .map((entry) => `chain ${entry.chainId}: ${entry.lastIndexedBlock}`)
-                  .join(' | ')
-              : 'No indexer state yet'}
-          </div>
-          <button
-            className="text-sm border border-gray-300 dark:border-gray-600 px-3 py-1 rounded"
-            onClick={() => void loadIntents(token)}
-            disabled={!canManageOwnerFlows}
-          >
-            Refresh Intents
-          </button>
-        </div>
-        {adminMetrics?.intents?.totals && (
-          <div className="lg:col-span-3 grid gap-3 md:grid-cols-4">
-            <div className="rounded border border-gray-200 bg-white p-3 text-xs dark:border-gray-700 dark:bg-gray-800">
-              <div className="text-gray-500 dark:text-gray-400">Pending</div>
-              <div className="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
-                {adminMetrics.intents.totals.pending}
               </div>
-            </div>
-            <div className="rounded border border-gray-200 bg-white p-3 text-xs dark:border-gray-700 dark:bg-gray-800">
-              <div className="text-gray-500 dark:text-gray-400">Submitted</div>
-              <div className="mt-1 text-lg font-semibold text-gray-900 dark:text-white">
-                {adminMetrics.intents.totals.submitted}
-              </div>
-            </div>
-            <div className="rounded border border-green-200 bg-green-50 p-3 text-xs dark:border-green-800/60 dark:bg-green-900/20">
-              <div className="text-green-700 dark:text-green-300">Confirmed</div>
-              <div className="mt-1 text-lg font-semibold text-green-800 dark:text-green-200">
-                {adminMetrics.intents.totals.confirmed}
-              </div>
-            </div>
-            <div className="rounded border border-red-200 bg-red-50 p-3 text-xs dark:border-red-800/60 dark:bg-red-900/20">
-              <div className="text-red-700 dark:text-red-300">Failed</div>
-              <div className="mt-1 text-lg font-semibold text-red-800 dark:text-red-200">
-                {adminMetrics.intents.totals.failed}
-              </div>
-            </div>
-          </div>
-        )}
-        {ownerHealthAlerts.length > 0 && (
-          <div className="lg:col-span-3 space-y-2">
-            {ownerHealthAlerts.map((alert, index) => (
-              <div
-                key={`${alert.text}-${index}`}
-                className={
-                  alert.tone === 'danger'
-                    ? 'rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-800/60 dark:bg-red-900/30 dark:text-red-200'
-                    : 'rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-800/60 dark:bg-amber-900/30 dark:text-amber-200'
-                }
-              >
-                {alert.text}
-              </div>
-            ))}
-          </div>
-        )}
-        {intentsLoading && (
-          <div className="lg:col-span-3 rounded-lg bg-blue-50 px-4 py-3 text-blue-700 dark:bg-blue-900/40 dark:text-blue-200">
-            Refreshing intent statuses...
-          </div>
-        )}
-        <div className="rounded-2xl border border-white/70 bg-white/85 p-6 shadow-xl shadow-slate-200/35 dark:border-white/10 dark:bg-slate-900/70 dark:shadow-black/35">
-          <div className="mb-4 flex items-center justify-between gap-2">
-            <h3 className="text-lg font-bold text-gray-900 dark:text-white">Property Intents</h3>
-            {propertyIntents.length > 2 && (
-              <button
-                className="text-xs border border-gray-300 dark:border-gray-600 px-2 py-1 rounded"
-                onClick={() => setShowAllPropertyIntents((prev) => !prev)}
-              >
-                {showAllPropertyIntents ? 'Show latest 2' : `View all (${propertyIntents.length})`}
-              </button>
-            )}
-          </div>
-          {propertyIntents.length === 0 ? (
-            <p className="text-sm text-gray-500 dark:text-gray-400">No property intents yet.</p>
-          ) : (
-            <div className="space-y-3">
-              {visiblePropertyIntents.map((intent) => (
-                <div key={intent.id} className="rounded border border-gray-200 p-3 dark:border-gray-700">
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm font-medium text-gray-900 dark:text-white">
-                      {intent.propertyId}
-                    </span>
-                    <span className={`text-xs px-2 py-1 rounded ${intentStatusClass(intent.status)}`}>
-                      {intent.status}
-                    </span>
-                  </div>
-                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                    Attempts: {intent.attemptCount}
-                  </div>
-                  {(intent.startTime || intent.endTime) && (
-                    <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                      Schedule:{' '}
-                      {intent.startTime ? new Date(intent.startTime).toLocaleString() : 'N/A'}{' '}
-                      {'->'}{' '}
-                      {intent.endTime ? new Date(intent.endTime).toLocaleString() : 'N/A'}
-                    </div>
-                  )}
-                  {intent.errorMessage && (
-                    <div className="mt-1 text-xs text-red-600 dark:text-red-300">{intent.errorMessage}</div>
-                  )}
-                  {intent.status === 'failed' && (
-                    <div className="mt-2 flex gap-2">
-                      <button
-                        className="rounded border border-blue-300 px-2 py-1 text-xs text-blue-700 hover:bg-blue-50 disabled:opacity-50 dark:border-blue-700 dark:text-blue-300 dark:hover:bg-blue-900/20"
-                        onClick={() => void handleIntentAction('retry', 'property', intent.id)}
-                        disabled={
-                          !canManageOwnerFlows ||
-                          intentActionLoadingKey === `retry:property:${intent.id}`
-                        }
-                      >
-                        {intentActionLoadingKey === `retry:property:${intent.id}`
-                          ? 'Retrying...'
-                          : 'Retry'}
-                      </button>
-                      <button
-                        className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700/40"
-                        onClick={() => void handleIntentAction('reset', 'property', intent.id)}
-                        disabled={
-                          !canManageOwnerFlows ||
-                          intentActionLoadingKey === `reset:property:${intent.id}`
-                        }
-                      >
-                        {intentActionLoadingKey === `reset:property:${intent.id}`
-                          ? 'Resetting...'
-                          : 'Reset'}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ))}
             </div>
           )}
-        </div>
 
-        <div className="rounded-2xl border border-white/70 bg-white/85 p-6 shadow-xl shadow-slate-200/35 dark:border-white/10 dark:bg-slate-900/70 dark:shadow-black/35">
-          <div className="mb-4 flex items-center justify-between gap-2">
-            <h3 className="text-lg font-bold text-gray-900 dark:text-white">Profit Intents</h3>
-            {profitIntents.length > 2 && (
-              <button
-                className="text-xs border border-gray-300 dark:border-gray-600 px-2 py-1 rounded"
-                onClick={() => setShowAllProfitIntents((prev) => !prev)}
-              >
-                {showAllProfitIntents ? 'Show latest 2' : `View all (${profitIntents.length})`}
-              </button>
-            )}
-          </div>
-          {profitIntents.length === 0 ? (
-            <p className="text-sm text-gray-500 dark:text-gray-400">No profit intents yet.</p>
-          ) : (
-            <div className="space-y-3">
-              {visibleProfitIntents.map((intent) => (
-                <div key={intent.id} className="rounded border border-gray-200 p-3 dark:border-gray-700">
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm font-medium text-gray-900 dark:text-white">
-                      {intent.propertyId}
-                    </span>
-                    <span className={`text-xs px-2 py-1 rounded ${intentStatusClass(intent.status)}`}>
-                      {intent.status}
+          {/* Modal: Edit Property */}
+          {showEditPropertyModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+              <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-white/10 bg-slate-900/95 p-6 shadow-2xl shadow-black/50 backdrop-blur">
+                <div className="sticky top-0 z-10 -mx-6 -mt-6 mb-4 flex items-center justify-between border-b border-white/10 bg-slate-900/80 px-6 py-4 backdrop-blur">
+                  <h2 className="text-xl font-bold text-white">
+                    Edit Property: {editingPropertyId}
+                  </h2>
+                  <button
+                    className="rounded-lg border border-slate-600 px-3 py-1 text-sm text-slate-200 hover:bg-slate-800/70"
+                    onClick={() => {
+                      setShowEditPropertyModal(false);
+                      setEditingPropertyId('');
+                    }}
+                  >
+                    Close
+                  </button>
+                </div>
+                <div className="space-y-4">
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Property name"
+                    value={editPropertyForm.name}
+                    onChange={(event) => handleEditPropertyChange('name', event.target.value)}
+                  />
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Location"
+                    value={editPropertyForm.location}
+                    onChange={(event) => handleEditPropertyChange('location', event.target.value)}
+                  />
+                  <textarea
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Description"
+                    rows={3}
+                    value={editPropertyForm.description}
+                    onChange={(event) => handleEditPropertyChange('description', event.target.value)}
+                  />
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Image URL"
+                    value={editPropertyForm.imageUrl}
+                    onChange={(event) => handleEditPropertyChange('imageUrl', event.target.value)}
+                  />
+                  <textarea
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Gallery image URLs (one per line)"
+                    rows={4}
+                    value={editPropertyForm.imageUrlsText}
+                    onChange={(event) => handleEditPropertyChange('imageUrlsText', event.target.value)}
+                  />
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="YouTube URL"
+                    value={editPropertyForm.youtubeEmbedUrl}
+                    onChange={(event) => handleEditPropertyChange('youtubeEmbedUrl', event.target.value)}
+                  />
+                  <div className="sticky bottom-0 z-10 -mx-6 -mb-6 flex justify-end gap-2 border-t border-white/10 bg-slate-900/80 px-6 py-4 backdrop-blur">
+                    <button
+                      className="rounded-lg border border-slate-600 px-4 py-2 text-slate-200 hover:bg-slate-800/60 transition-all"
+                      onClick={() => setEditPropertyForm(initialEditPropertyForm)}
+                    >
+                      Reset Changes
+                    </button>
+                    <button
+                      className="rounded-lg border border-slate-600 px-4 py-2 text-slate-200 hover:bg-slate-800/60 transition-all"
+                      onClick={() => {
+                        setShowEditPropertyModal(false);
+                        setEditingPropertyId('');
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="rounded-lg bg-gradient-to-r from-emerald-600 to-emerald-500 px-6 py-2 text-white font-medium hover:shadow-lg hover:shadow-emerald-500/30 disabled:opacity-60 transition-all"
+                      onClick={handleSavePropertyEdits}
+                      disabled={!canManageOwnerFlows || !editingPropertyId}
+                    >
+                      Save Changes
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal: Create Profit Intent */}
+          {showCreateProfitModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+              <div className="w-full max-w-3xl rounded-2xl border border-white/10 bg-slate-900/95 p-6 shadow-2xl shadow-black/50 backdrop-blur">
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="text-xl font-bold text-white">Create Profit Distribution Intent</h2>
+                  <button
+                    className="rounded-lg border border-slate-600 px-3 py-1 text-sm text-slate-200 hover:bg-slate-800/70"
+                    onClick={() => setShowCreateProfitModal(false)}
+                  >
+                    Close
+                  </button>
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <select
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 focus:border-blue-500/50 focus:outline-none transition-all"
+                    value={profitForm.propertyId}
+                    onChange={(event) => handleProfitChange('propertyId', event.target.value)}
+                  >
+                    <option value="">Select property</option>
+                    {properties.map((property) => (
+                      <option key={property.propertyId} value={property.propertyId}>
+                        {property.propertyId}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="USDC amount"
+                    value={profitForm.usdcAmount}
+                    onChange={(event) => handleProfitChange('usdcAmount', event.target.value)}
+                  />
+                </div>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <button
+                    className="rounded-lg border border-blue-500/50 bg-blue-500/10 px-4 py-2 text-blue-300 hover:bg-blue-500/20 disabled:opacity-60 transition-all"
+                    onClick={handleApproveProfitAllowance}
+                    disabled={
+                      !canManageOwnerFlows ||
+                      isApprovingProfitAllowance ||
+                      !profitForm.propertyId ||
+                      !profitForm.usdcAmount
+                    }
+                  >
+                    {isApprovingProfitAllowance ? 'Approving...' : 'Approve USDC Allowance'}
+                  </button>
+                  <button
+                    className="rounded-lg bg-gradient-to-r from-emerald-600 to-emerald-500 px-4 py-2 text-white font-medium hover:shadow-lg hover:shadow-emerald-500/30 disabled:opacity-60 transition-all"
+                    onClick={handleApproveAndSubmitProfitIntent}
+                    disabled={
+                      !canManageOwnerFlows ||
+                      isApprovingProfitAllowance ||
+                      !profitPreflight ||
+                      !profitPreflight.checks.operatorConfigured
+                    }
+                  >
+                    {isApprovingProfitAllowance ? 'Processing...' : 'Approve + Submit Intent'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal: Create Platform Fee Intent */}
+          {showPlatformFeeModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+              <div className="w-full max-w-3xl rounded-2xl border border-white/10 bg-slate-900/95 p-6 shadow-2xl shadow-black/50 backdrop-blur">
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="text-xl font-bold text-white">Update Platform Fee (Intent)</h2>
+                  <button
+                    className="rounded-lg border border-slate-600 px-3 py-1 text-sm text-slate-200 hover:bg-slate-800/70"
+                    onClick={() => setShowPlatformFeeModal(false)}
+                  >
+                    Close
+                  </button>
+                </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <select
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 focus:border-blue-500/50 focus:outline-none transition-all"
+                    value={platformFeeForm.campaignAddress}
+                    onChange={(event) => handleSelectPlatformCampaign(event.target.value)}
+                  >
+                    <option value="">Select campaign</option>
+                    {campaigns.map((campaign) => (
+                      <option key={campaign.campaignAddress} value={campaign.campaignAddress}>
+                        {campaign.propertyId}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Platform fee bps (0-2000)"
+                    value={platformFeeForm.platformFeeBps}
+                    onChange={(event) => handlePlatformFeeChange('platformFeeBps', event.target.value)}
+                  />
+                </div>
+                <div className="mt-4 flex justify-end gap-2">
+                  <button
+                    className="rounded-lg border border-slate-600 px-4 py-2 text-slate-200 hover:bg-slate-800/60 transition-all"
+                    onClick={() => setShowPlatformFeeModal(false)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="rounded-lg bg-gradient-to-r from-emerald-600 to-emerald-500 px-6 py-2 text-white font-medium hover:shadow-lg hover:shadow-emerald-500/30 disabled:opacity-60 transition-all"
+                    onClick={handleCreatePlatformFeeIntent}
+                    disabled={!canManageOwnerFlows || !hasPlatformFeeBasicsValid}
+                  >
+                    Submit Platform Fee Intent
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Modal: Settlement Wizard */}
+          {showCombinedIntentModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+              <div className="w-full max-w-3xl rounded-2xl border border-white/10 bg-slate-900/95 p-6 shadow-2xl shadow-black/50 backdrop-blur">
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="text-xl font-bold text-white">Settlement Wizard</h2>
+                  <button
+                    className="rounded-lg border border-slate-600 px-3 py-1 text-sm text-slate-200 hover:bg-slate-800/70"
+                    onClick={() => setShowCombinedIntentModal(false)}
+                  >
+                    Close
+                  </button>
+                </div>
+                <p className="mb-4 text-sm text-slate-300">
+                  Submit platform fee and investor distribution intents together from one gross settlement amount.
+                </p>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <select
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 focus:border-blue-500/50 focus:outline-none transition-all"
+                    value={combinedForm.campaignAddress}
+                    onChange={(event) => handleSelectCombinedCampaign(event.target.value)}
+                  >
+                    <option value="">Select campaign</option>
+                    {campaigns.map((campaign) => (
+                      <option key={campaign.campaignAddress} value={campaign.campaignAddress}>
+                        {campaign.propertyId}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Gross settlement amount (USDC)"
+                    value={combinedForm.grossSettlementUsdc}
+                    onChange={(event) => handleCombinedChange('grossSettlementUsdc', event.target.value)}
+                  />
+                </div>
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Platform fee bps (0-2000)"
+                    value={combinedForm.platformFeeBps}
+                    onChange={(event) => handleCombinedChange('platformFeeBps', event.target.value)}
+                  />
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Platform fee recipient (optional if already configured)"
+                    value={combinedForm.platformFeeRecipient}
+                    onChange={(event) => handleCombinedChange('platformFeeRecipient', event.target.value)}
+                  />
+                </div>
+                <div className="mt-4 grid gap-3 rounded-lg border border-slate-700/60 bg-slate-900/50 p-4 text-sm md:grid-cols-2">
+                  <div className="text-slate-300">
+                    Platform fee ({Number.isFinite(normalizedCombinedFeeBps) ? normalizedCombinedFeeBps : 0} bps):{' '}
+                    <span className="font-semibold text-white">
+                      {computedCombinedFeeUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC
                     </span>
                   </div>
-                  <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                    ${(Number(intent.usdcAmountBaseUnits) / 1_000_000).toLocaleString()} USDC
+                  <div className="text-slate-300">
+                    Net investor distribution:{' '}
+                    <span className="font-semibold text-emerald-300">
+                      {computedCombinedNetDistributionUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC
+                    </span>
                   </div>
-                  {intent.errorMessage && (
-                    <div className="mt-1 text-xs text-red-600 dark:text-red-300">{intent.errorMessage}</div>
-                  )}
-                  {intent.status === 'failed' && (
-                    <div className="mt-2 flex gap-2">
-                      <button
-                        className="rounded border border-blue-300 px-2 py-1 text-xs text-blue-700 hover:bg-blue-50 disabled:opacity-50 dark:border-blue-700 dark:text-blue-300 dark:hover:bg-blue-900/20"
-                        onClick={() => void handleIntentAction('retry', 'profit', intent.id)}
-                        disabled={
-                          !canManageOwnerFlows ||
-                          intentActionLoadingKey === `retry:profit:${intent.id}`
-                        }
-                      >
-                        {intentActionLoadingKey === `retry:profit:${intent.id}`
-                          ? 'Retrying...'
-                          : 'Retry'}
-                      </button>
-                      <button
-                        className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700/40"
-                        onClick={() => void handleIntentAction('reset', 'profit', intent.id)}
-                        disabled={
-                          !canManageOwnerFlows ||
-                          intentActionLoadingKey === `reset:profit:${intent.id}`
-                        }
-                      >
-                        {intentActionLoadingKey === `reset:profit:${intent.id}`
-                          ? 'Resetting...'
-                          : 'Reset'}
-                      </button>
+                  <div className="text-slate-400 md:col-span-2">
+                    This submits both intents: platform fee update + profit distribution deposit.
+                  </div>
+                </div>
+                <div className="mt-4 flex justify-end gap-2">
+                  <button
+                    className="rounded-lg border border-slate-600 px-4 py-2 text-slate-200 hover:bg-slate-800/60 transition-all"
+                    onClick={() => setShowCombinedIntentModal(false)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="rounded-lg bg-gradient-to-r from-emerald-600 to-emerald-500 px-6 py-2 text-white font-medium hover:shadow-lg hover:shadow-emerald-500/30 disabled:opacity-60 transition-all"
+                    onClick={handleCreateCombinedIntentBatch}
+                    disabled={!canManageOwnerFlows || !combinedForm.campaignAddress}
+                  >
+                    Submit Settlement Intents
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {canViewOwnerConsole && (
+            <>
+              {/* Property Catalog */}
+              <div className="mb-8 rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="text-2xl font-bold text-white">Property Catalog</h2>
+                  <button
+                    className="rounded-lg border border-blue-500/50 bg-blue-500/10 px-3 py-1 text-sm text-blue-300 hover:bg-blue-500/20 transition-all"
+                    onClick={() => void loadAdminProperties(token)}
+                    disabled={!canManageOwnerFlows || propertyCatalogLoading}
+                  >
+                    {propertyCatalogLoading ? 'Refreshing...' : 'Refresh'}
+                  </button>
+                </div>
+                <div className="mb-4">
+                  <input
+                    className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                    placeholder="Search by propertyId, name, location"
+                    value={propertyCatalogQuery}
+                    onChange={(event) => setPropertyCatalogQuery(event.target.value)}
+                  />
+                </div>
+                {propertyCatalogLoading ? (
+                  <p className="text-slate-400">Loading properties...</p>
+                ) : adminProperties.length === 0 ? (
+                  <p className="text-slate-400">No properties found.</p>
+                ) : (
+                  <div className="overflow-hidden rounded-lg border border-white/10">
+                    <div className="max-h-96 overflow-auto">
+                      <table className="min-w-full text-sm">
+                        <thead className="sticky top-0 z-10 bg-slate-900/80 border-b border-white/10">
+                          <tr className="text-left text-xs uppercase tracking-wide text-slate-400">
+                            <th className="px-3 py-2 font-semibold">Property</th>
+                            <th className="px-3 py-2 font-semibold">Status</th>
+                            <th className="px-3 py-2 font-semibold">Location</th>
+                            <th className="px-3 py-2 font-semibold text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/5">
+                          {filteredAdminProperties.map((property) => {
+                            const isArchived = !!property.archivedAt;
+                            const isLoading = propertyActionLoadingId === property.propertyId;
+                            return (
+                              <tr key={property.propertyId} className="bg-slate-900/30 hover:bg-slate-900/50 transition-colors">
+                                <td className="px-3 py-2 align-middle">
+                                  <div className="font-medium text-white">{property.propertyId}</div>
+                                  <div className="text-xs text-slate-400">{property.name}</div>
+                                </td>
+                                <td className="px-3 py-2 align-middle">
+                                  <span
+                                    className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                                      isArchived
+                                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                        : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                    }`}
+                                  >
+                                    {isArchived ? 'Archived' : 'Active'}
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2 align-middle text-slate-300">{property.location || 'N/A'}</td>
+                                <td className="px-3 py-2 align-middle text-right">
+                                  <div className="flex items-center justify-end gap-2">
+                                    <button
+                                      className="rounded border border-blue-500/50 bg-blue-500/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-500/20 disabled:opacity-60 transition-all"
+                                      onClick={() => openEditPropertyModal(property)}
+                                      disabled={!canManageOwnerFlows || isLoading}
+                                    >
+                                      Edit
+                                    </button>
+                                    {isArchived ? (
+                                      <button
+                                        className="rounded border border-emerald-500/50 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-60 transition-all"
+                                        onClick={() => void handleRestoreProperty(property.propertyId)}
+                                        disabled={!canManageOwnerFlows || isLoading}
+                                      >
+                                        {isLoading ? 'Restoring...' : 'Restore'}
+                                      </button>
+                                    ) : (
+                                      <button
+                                        className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-xs text-amber-300 hover:bg-amber-500/20 disabled:opacity-60 transition-all"
+                                        onClick={() => void handleArchiveProperty(property.propertyId)}
+                                        disabled={!canManageOwnerFlows || isLoading}
+                                      >
+                                        {isLoading ? 'Archiving...' : 'Archive'}
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Campaign Overview */}
+              <div className="mb-8 rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="text-2xl font-bold text-white">Campaign Fee Overview</h2>
+                  <button
+                    className="rounded-lg border border-slate-600 px-3 py-1 text-sm text-slate-200 hover:bg-slate-800/60 transition-all"
+                    onClick={() => void loadCampaigns()}
+                  >
+                    Refresh
+                  </button>
+                </div>
+                {campaignsLoading ? (
+                  <p className="text-slate-400">Loading campaigns...</p>
+                ) : campaigns.length === 0 ? (
+                  <p className="text-slate-400">No campaigns indexed yet.</p>
+                ) : (
+                  <div className="overflow-hidden rounded-lg border border-white/10">
+                    <div className="max-h-96 overflow-auto">
+                      <table className="min-w-full text-sm">
+                        <thead className="sticky top-0 z-10 bg-slate-900/80 border-b border-white/10">
+                          <tr className="text-left text-xs uppercase tracking-wide text-slate-400">
+                            <th className="px-3 py-2 font-semibold">Property</th>
+                            <th className="px-3 py-2 font-semibold">State</th>
+                            <th className="px-3 py-2 font-semibold">Raised / Target</th>
+                            <th className="px-3 py-2 font-semibold">Fee</th>
+                            <th className="px-3 py-2 font-semibold text-right">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/5">
+                          {visibleCampaigns.map((campaign) => {
+                            const propertyMeta = properties.find(
+                              (property) => property.propertyId === campaign.propertyId
+                            );
+                            const raisedUsdc = Number(campaign.raisedUsdcBaseUnits) / 1_000_000;
+                            const targetUsdc = Number(campaign.targetUsdcBaseUnits) / 1_000_000;
+                            const campaignKey = campaign.campaignAddress.toLowerCase();
+                            const isChecking = campaignLifecycleLoadingKey === `check:${campaignKey}`;
+                            const isFinalizing = campaignLifecycleLoadingKey === `finalize:${campaignKey}`;
+                            const isWithdrawing = campaignLifecycleLoadingKey === `withdraw:${campaignKey}`;
+
+                            return (
+                              <tr key={campaign.campaignAddress} className="bg-slate-900/30 hover:bg-slate-900/50 transition-colors">
+                                <td className="px-3 py-2 align-middle">
+                                  <div className="font-medium text-white">{campaign.propertyId}</div>
+                                  <div className="font-mono text-[11px] text-slate-400">
+                                    {campaign.campaignAddress.slice(0, 8)}...
+                                  </div>
+                                </td>
+                                <td className="px-3 py-2 align-middle">
+                                  <span
+                                    className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                                      campaign.state === 'SUCCESS'
+                                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                        : campaign.state === 'FAILED'
+                                          ? 'bg-red-500/20 text-red-300 border border-red-500/30'
+                                          : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                    }`}
+                                  >
+                                    {campaign.state}
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2 align-middle font-mono text-xs text-slate-300">
+                                  {raisedUsdc.toLocaleString(undefined, {
+                                    maximumFractionDigits: 0,
+                                  })}{' '}
+                                  /{' '}
+                                  {targetUsdc.toLocaleString(undefined, {
+                                    maximumFractionDigits: 0,
+                                  })}
+                                </td>
+                                <td className="px-3 py-2 align-middle text-slate-300">
+                                  {campaign.platformFeeBps === null ? 'Not set' : `${(campaign.platformFeeBps / 100).toFixed(2)}%`}
+                                </td>
+                                <td className="px-3 py-2 align-middle text-right">
+                                  <div className="flex flex-wrap items-center justify-end gap-2">
+                                    <button
+                                      className="rounded border border-blue-500/50 bg-blue-500/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-500/20 disabled:opacity-60 transition-all"
+                                      onClick={() => void handleCheckCampaignLifecycle(campaign.campaignAddress)}
+                                      disabled={!canManageOwnerFlows || isChecking || isFinalizing || isWithdrawing}
+                                    >
+                                      {isChecking ? 'Checking...' : 'Check'}
+                                    </button>
+                                    <button
+                                      className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-xs text-amber-300 hover:bg-amber-500/20 disabled:opacity-60 transition-all"
+                                      onClick={() => void handleFinalizeCampaign(campaign.campaignAddress)}
+                                      disabled={
+                                        !canManageOwnerFlows ||
+                                        campaign.state !== 'ACTIVE' ||
+                                        isChecking ||
+                                        isFinalizing ||
+                                        isWithdrawing
+                                      }
+                                    >
+                                      {isFinalizing ? 'Finalizing...' : 'Finalize'}
+                                    </button>
+                                    <button
+                                      className="rounded border border-emerald-500/50 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-60 transition-all"
+                                      onClick={() => void handleWithdrawCampaignFunds(campaign.campaignAddress)}
+                                      disabled={
+                                        !canManageOwnerFlows ||
+                                        campaign.state !== 'SUCCESS' ||
+                                        isChecking ||
+                                        isFinalizing ||
+                                        isWithdrawing
+                                      }
+                                    >
+                                      {isWithdrawing ? 'Withdrawing...' : 'Withdraw'}
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Combined Submissions */}
+              <div className="mb-8 rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="text-2xl font-bold text-white">Recent Combined Submissions</h2>
+                  <button
+                    className="rounded-lg border border-slate-600 px-3 py-1 text-sm text-slate-200 hover:bg-slate-800/60 transition-all"
+                    onClick={() => void handleRefreshCombinedStatuses()}
+                    disabled={!canManageOwnerFlows || combinedProgressLoading}
+                  >
+                    {combinedProgressLoading ? 'Refreshing...' : 'Refresh Status'}
+                  </button>
+                </div>
+                {combinedHistory.length === 0 ? (
+                  <p className="text-sm text-slate-400">No combined submissions yet.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {visibleCombinedHistory.map((record) => {
+                      const profitIntent = record.profitIntentId
+                        ? profitIntentById.get(record.profitIntentId)
+                        : null;
+                      const platformIntent = record.platformFeeIntentId
+                        ? platformFeeIntentById.get(record.platformFeeIntentId)
+                        : null;
+                      const outcome = getCombinedOutcome(record);
+
+                      return (
+                        <div
+                          key={record.id}
+                          className={`rounded-lg border p-3 backdrop-blur transition-all ${
+                            outcome === 'completed'
+                              ? 'border-emerald-500/30 bg-emerald-500/5'
+                              : outcome === 'needs_attention'
+                                ? 'border-red-500/30 bg-red-500/5'
+                                : 'border-white/10 bg-slate-800/30'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <div className="font-medium text-white">{record.propertyId}</div>
+                              <div className="text-xs text-slate-400">{record.campaignAddress}</div>
+                            </div>
+                            <span
+                              className={`text-xs px-2 py-1 rounded font-medium ${
+                                outcome === 'completed'
+                                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                  : outcome === 'needs_attention'
+                                    ? 'bg-red-500/20 text-red-300 border border-red-500/30'
+                                    : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                              }`}
+                            >
+                              {outcome === 'completed'
+                                ? 'Completed'
+                                : outcome === 'needs_attention'
+                                  ? 'Needs Attention'
+                                  : 'In Progress'}
+                            </span>
+                          </div>
+                          {profitIntent && (
+                            <div className="mt-2 flex items-center gap-2 text-xs">
+                              <span className="text-slate-400">Profit:</span>
+                              <span className={`${intentStatusClass(profitIntent.status)} px-2 py-0.5 rounded font-medium`}>
+                                {profitIntent.status}
+                              </span>
+                            </div>
+                          )}
+                          {platformIntent && (
+                            <div className="mt-1 flex items-center gap-2 text-xs">
+                              <span className="text-slate-400">Platform Fee:</span>
+                              <span className={`${intentStatusClass(platformIntent.status)} px-2 py-0.5 rounded font-medium`}>
+                                {platformIntent.status}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Intents Overview */}
+              <div className="grid gap-6 lg:grid-cols-3">
+                {/* Property Intents */}
+                <div className="rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
+                  <h3 className="mb-4 text-lg font-bold text-white">Property Intents</h3>
+                  {propertyIntents.length === 0 ? (
+                    <p className="text-sm text-slate-400">No property intents yet.</p>
+                  ) : (
+                    <div className="space-y-3">
+                      {visiblePropertyIntents.map((intent) => (
+                        <div key={intent.id} className="rounded-lg border border-white/10 bg-slate-800/30 p-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm font-medium text-white">{intent.propertyId}</span>
+                            <span className={`text-xs px-2 py-0.5 rounded font-medium ${intentStatusClass(intent.status)}`}>
+                              {intent.status}
+                            </span>
+                          </div>
+                          <div className="mt-2 text-xs text-slate-400">Attempts: {intent.attemptCount}</div>
+                          {intent.errorMessage && (
+                            <div className="mt-1 text-xs text-red-400">{intent.errorMessage}</div>
+                          )}
+                          {intent.status === 'failed' && (
+                            <div className="mt-2 flex gap-2">
+                              <button
+                                className="rounded border border-blue-500/50 bg-blue-500/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-500/20 disabled:opacity-50 transition-all"
+                                onClick={() => void handleIntentAction('retry', 'property', intent.id)}
+                                disabled={!canManageOwnerFlows || intentActionLoadingKey === `retry:property:${intent.id}`}
+                              >
+                                {intentActionLoadingKey === `retry:property:${intent.id}` ? 'Retrying...' : 'Retry'}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
 
-        <div className="rounded-2xl border border-white/70 bg-white/85 p-6 shadow-xl shadow-slate-200/35 dark:border-white/10 dark:bg-slate-900/70 dark:shadow-black/35">
-          <div className="mb-4 flex items-center justify-between gap-2">
-            <h3 className="text-lg font-bold text-gray-900 dark:text-white">Platform Fee Intents</h3>
-            {platformFeeIntents.length > 2 && (
-              <button
-                className="text-xs border border-gray-300 dark:border-gray-600 px-2 py-1 rounded"
-                onClick={() => setShowAllPlatformFeeIntents((prev) => !prev)}
-              >
-                {showAllPlatformFeeIntents
-                  ? 'Show latest 2'
-                  : `View all (${platformFeeIntents.length})`}
-              </button>
-            )}
-          </div>
-          {platformFeeIntents.length === 0 ? (
-            <p className="text-sm text-gray-500 dark:text-gray-400">No platform fee intents yet.</p>
-          ) : (
-            <div className="space-y-3">
-              {visiblePlatformFeeIntents.map((intent) => (
-                <div key={intent.id} className="rounded border border-gray-200 p-3 dark:border-gray-700">
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm font-medium text-gray-900 dark:text-white">
-                      {(intent.platformFeeBps / 100).toFixed(2)}%
-                    </span>
-                    <span className={`text-xs px-2 py-1 rounded ${intentStatusClass(intent.status)}`}>
-                      {intent.status}
-                    </span>
-                  </div>
-                  <div className="mt-2 text-xs font-mono text-gray-500 dark:text-gray-400 break-all">
-                    {intent.campaignAddress}
-                  </div>
-                  {intent.errorMessage && (
-                    <div className="mt-1 text-xs text-red-600 dark:text-red-300">{intent.errorMessage}</div>
-                  )}
-                  {intent.status === 'failed' && (
-                    <div className="mt-2 flex gap-2">
-                      <button
-                        className="rounded border border-blue-300 px-2 py-1 text-xs text-blue-700 hover:bg-blue-50 disabled:opacity-50 dark:border-blue-700 dark:text-blue-300 dark:hover:bg-blue-900/20"
-                        onClick={() => void handleIntentAction('retry', 'platformFee', intent.id)}
-                        disabled={
-                          !canManageOwnerFlows ||
-                          intentActionLoadingKey === `retry:platformFee:${intent.id}`
-                        }
-                      >
-                        {intentActionLoadingKey === `retry:platformFee:${intent.id}`
-                          ? 'Retrying...'
-                          : 'Retry'}
-                      </button>
-                      <button
-                        className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-700/40"
-                        onClick={() => void handleIntentAction('reset', 'platformFee', intent.id)}
-                        disabled={
-                          !canManageOwnerFlows ||
-                          intentActionLoadingKey === `reset:platformFee:${intent.id}`
-                        }
-                      >
-                        {intentActionLoadingKey === `reset:platformFee:${intent.id}`
-                          ? 'Resetting...'
-                          : 'Reset'}
-                      </button>
+                {/* Profit Intents */}
+                <div className="rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
+                  <h3 className="mb-4 text-lg font-bold text-white">Profit Intents</h3>
+                  {profitIntents.length === 0 ? (
+                    <p className="text-sm text-slate-400">No profit intents yet.</p>
+                  ) : (
+                    <div className="space-y-3">
+                      {visibleProfitIntents.map((intent) => (
+                        <div key={intent.id} className="rounded-lg border border-white/10 bg-slate-800/30 p-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm font-medium text-white">{intent.propertyId}</span>
+                            <span className={`text-xs px-2 py-0.5 rounded font-medium ${intentStatusClass(intent.status)}`}>
+                              {intent.status}
+                            </span>
+                          </div>
+                          <div className="mt-2 text-xs text-slate-400">
+                            ${(Number(intent.usdcAmountBaseUnits) / 1_000_000).toLocaleString()} USDC
+                          </div>
+                          {intent.status === 'failed' && (
+                            <div className="mt-2 flex gap-2">
+                              <button
+                                className="rounded border border-blue-500/50 bg-blue-500/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-500/20 disabled:opacity-50 transition-all"
+                                onClick={() => void handleIntentAction('retry', 'profit', intent.id)}
+                                disabled={!canManageOwnerFlows || intentActionLoadingKey === `retry:profit:${intent.id}`}
+                              >
+                                {intentActionLoadingKey === `retry:profit:${intent.id}` ? 'Retrying...' : 'Retry'}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
-              ))}
-            </div>
+
+                {/* Platform Fee Intents */}
+                <div className="rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
+                  <h3 className="mb-4 text-lg font-bold text-white">Platform Fee Intents</h3>
+                  {platformFeeIntents.length === 0 ? (
+                    <p className="text-sm text-slate-400">No platform fee intents yet.</p>
+                  ) : (
+                    <div className="space-y-3">
+                      {visiblePlatformFeeIntents.map((intent) => (
+                        <div key={intent.id} className="rounded-lg border border-white/10 bg-slate-800/30 p-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-sm font-medium text-white">
+                              {(intent.platformFeeBps / 100).toFixed(2)}%
+                            </span>
+                            <span className={`text-xs px-2 py-0.5 rounded font-medium ${intentStatusClass(intent.status)}`}>
+                              {intent.status}
+                            </span>
+                          </div>
+                          <div className="mt-2 text-xs font-mono text-slate-400 break-all">
+                            {intent.campaignAddress.slice(0, 12)}...
+                          </div>
+                          {intent.usdcAmountBaseUnits && BigInt(intent.usdcAmountBaseUnits) > 0n && (
+                            <div className="mt-1 text-xs text-slate-300">
+                              Transfer:{' '}
+                              {(Number(intent.usdcAmountBaseUnits) / 1_000_000).toLocaleString(undefined, {
+                                maximumFractionDigits: 6,
+                              })}{' '}
+                              USDC
+                            </div>
+                          )}
+                          {intent.status === 'failed' && (
+                            <div className="mt-2 flex gap-2">
+                              <button
+                                className="rounded border border-blue-500/50 bg-blue-500/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-500/20 disabled:opacity-50 transition-all"
+                                onClick={() => void handleIntentAction('retry', 'platformFee', intent.id)}
+                                disabled={!canManageOwnerFlows || intentActionLoadingKey === `retry:platformFee:${intent.id}`}
+                              >
+                                {intentActionLoadingKey === `retry:platformFee:${intent.id}` ? 'Retrying...' : 'Retry'}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* System Health */}
+              {adminMetrics && (
+                <div className="mt-8 rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
+                  <h2 className="mb-4 text-xl font-bold text-white">System Health</h2>
+                  {adminMetrics.intents?.totals && (
+                    <div className="grid gap-3 md:grid-cols-4">
+                      <div className="rounded-lg border border-white/10 bg-slate-800/30 p-3">
+                        <div className="text-xs text-slate-400">Pending</div>
+                        <div className="mt-1 text-2xl font-bold text-white">{adminMetrics.intents.totals.pending}</div>
+                      </div>
+                      <div className="rounded-lg border border-white/10 bg-slate-800/30 p-3">
+                        <div className="text-xs text-slate-400">Submitted</div>
+                        <div className="mt-1 text-2xl font-bold text-white">{adminMetrics.intents.totals.submitted}</div>
+                      </div>
+                      <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3">
+                        <div className="text-xs text-emerald-400">Confirmed</div>
+                        <div className="mt-1 text-2xl font-bold text-emerald-300">{adminMetrics.intents.totals.confirmed}</div>
+                      </div>
+                      <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3">
+                        <div className="text-xs text-red-400">Failed</div>
+                        <div className="mt-1 text-2xl font-bold text-red-300">{adminMetrics.intents.totals.failed}</div>
+                      </div>
+                    </div>
+                  )}
+                  {ownerHealthAlerts.length > 0 && (
+                    <div className="mt-4 space-y-2">
+                      {ownerHealthAlerts.map((alert, index) => (
+                        <div
+                          key={`${alert.text}-${index}`}
+                          className={
+                            alert.tone === 'danger'
+                              ? 'rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200'
+                              : 'rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200'
+                          }
+                        >
+                          {alert.text}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </div>
-      </div>
-      </>
-      )}
       </div>
     </div>
   );

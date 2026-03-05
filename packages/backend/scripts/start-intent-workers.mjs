@@ -21,6 +21,11 @@ const workers = [
     script: 'scripts/process-indexer-sync.mjs',
     env: { INDEXER_CONTINUOUS: 'true' },
   },
+  {
+    name: 'campaign-lifecycle-worker',
+    script: 'scripts/process-campaign-lifecycle.mjs',
+    env: { CAMPAIGN_LIFECYCLE_CONTINUOUS: 'true' },
+  },
 ];
 
 const children = [];

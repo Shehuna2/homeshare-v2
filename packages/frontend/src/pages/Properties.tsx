@@ -2,6 +2,31 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { fetchCampaigns, fetchProperties, PropertyResponse, CampaignResponse } from '../lib/api';
 
+// Inline SVG Icons
+const SearchIcon = ({ className }: { className: string }) => (
+  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+  </svg>
+);
+
+const ChevronRight = ({ className }: { className: string }) => (
+  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+  </svg>
+);
+
+const Clock = ({ className }: { className: string }) => (
+  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+  </svg>
+);
+
+const TrendingUp = ({ className }: { className: string }) => (
+  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+  </svg>
+);
+
 const formatCountdown = (startTimeIso: string, nowMs: number): string | null => {
   const startMs = Date.parse(startTimeIso);
   if (Number.isNaN(startMs) || startMs <= nowMs) {
@@ -15,17 +40,41 @@ const formatCountdown = (startTimeIso: string, nowMs: number): string | null => 
   return `${days}d ${hours}h ${minutes}m ${seconds}s`;
 };
 
+const toUsdcNumber = (baseUnits: string | null | undefined): number =>
+  Number(baseUnits ?? '0') / 1_000_000;
+
+type PropertyFundingPhase = 'NOT_STARTED' | 'ACTIVE' | 'FUNDED' | 'FAILED' | 'ENDED' | 'UNKNOWN';
+
+const getPropertyFundingPhase = (
+  campaign: CampaignResponse | undefined,
+  nowMs: number
+): PropertyFundingPhase => {
+  if (!campaign) return 'UNKNOWN';
+  if (campaign.state === 'FAILED') return 'FAILED';
+  if (campaign.state === 'SUCCESS') return 'FUNDED';
+  if (campaign.state === 'WITHDRAWN') return 'ENDED';
+  const startMs = campaign.startTime ? Date.parse(campaign.startTime) : Number.NaN;
+  if (!Number.isNaN(startMs) && startMs > nowMs) return 'NOT_STARTED';
+  return campaign.state === 'ACTIVE' ? 'ACTIVE' : 'UNKNOWN';
+};
+
 export default function Properties() {
   const [properties, setProperties] = useState<PropertyResponse[]>([]);
   const [campaignByPropertyId, setCampaignByPropertyId] = useState<Record<string, CampaignResponse>>({});
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState('');
   const [nowMs, setNowMs] = useState(Date.now());
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedNetwork, setSelectedNetwork] = useState('all');
+  const [selectedStatus, setSelectedStatus] = useState('all');
 
   useEffect(() => {
     let isMounted = true;
 
-    const loadProperties = async () => {
+    const loadProperties = async (showLoading = false) => {
+      if (showLoading && isMounted) {
+        setLoading(true);
+      }
       try {
         const [propertiesData, campaignsData] = await Promise.all([fetchProperties(), fetchCampaigns()]);
         const campaignMap = campaignsData.reduce<Record<string, CampaignResponse>>((acc, campaign) => {
@@ -41,16 +90,20 @@ export default function Properties() {
           setErrorMessage((error as Error).message);
         }
       } finally {
-        if (isMounted) {
+        if (showLoading && isMounted) {
           setLoading(false);
         }
       }
     };
 
-    loadProperties();
+    void loadProperties(true);
+    const poll = setInterval(() => {
+      void loadProperties(false);
+    }, 10000);
 
     return () => {
       isMounted = false;
+      clearInterval(poll);
     };
   }, []);
 
@@ -59,134 +112,277 @@ export default function Properties() {
     return () => clearInterval(timer);
   }, []);
 
-          return (
-    <div className="bg-gradient-to-br from-slate-50 via-white to-slate-100 py-10 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
-      <div className="container mx-auto px-4">
-        <div className="mb-8 rounded-2xl border border-white/70 bg-white/80 p-6 shadow-xl shadow-slate-200/40 backdrop-blur dark:border-white/10 dark:bg-slate-900/70 dark:shadow-black/40">
-          <h1 className="text-3xl font-semibold tracking-tight text-slate-900 dark:text-white">
-            Property Listings
-          </h1>
-          <p className="mt-2 text-slate-600 dark:text-slate-300">
-            Discover active and upcoming campaigns, then invest directly onchain.
-          </p>
-        </div>
+  const filteredProperties = properties.filter((property) => {
+    const campaign = campaignByPropertyId[property.propertyId];
+    const phase = getPropertyFundingPhase(campaign, nowMs);
+    const matchesSearch = property.name.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesStatus = selectedStatus === 'all' || phase.toLowerCase() === selectedStatus.toLowerCase();
+    return matchesSearch && matchesStatus;
+  });
 
-        <div className="mb-6 rounded-2xl border border-white/70 bg-white/80 p-4 shadow-lg shadow-slate-200/35 backdrop-blur dark:border-white/10 dark:bg-slate-900/65 dark:shadow-black/35">
-          <div className="grid gap-3 md:grid-cols-4">
-            <select className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-white">
-              <option>Base Networks</option>
-              <option>Base Sepolia</option>
-              <option>Base Mainnet</option>
-            </select>
-            <input
-              type="text"
-              placeholder="Search properties..."
-              className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-slate-900 placeholder:text-slate-400 dark:border-slate-600 dark:bg-slate-800 dark:text-white"
-            />
-            <select className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-slate-900 dark:border-slate-600 dark:bg-slate-800 dark:text-white">
-              <option>All Status</option>
-              <option>Draft</option>
-              <option>Funding</option>
-              <option>Funded</option>
-            </select>
-            <button className="rounded-xl bg-primary-600 px-6 py-2 text-white transition hover:bg-primary-700">
-              Apply Filters
-            </button>
+  return (
+    <div className="overflow-hidden min-h-screen">
+      <div>
+        <div className="container mx-auto px-4 py-12 md:py-16">
+          {/* Header */}
+          <div className="mb-12">
+            <div className="space-y-3 mb-8">
+              <h1 className="text-5xl md:text-6xl font-light tracking-tight text-white">
+                Property Listings
+              </h1>
+              <p className="text-lg text-slate-300 max-w-2xl">
+                Discover active and upcoming investment opportunities in real estate. Browse properties, view details, and invest directly onchain.
+              </p>
+            </div>
           </div>
-        </div>
 
-        {loading && (
-          <div className="text-slate-600 dark:text-slate-300">Loading properties...</div>
-        )}
+          {/* Filters */}
+          <div className="mb-12 rounded-2xl bg-slate-900/80 backdrop-blur border border-slate-700/50 p-6">
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+              {/* Network Filter */}
+              <div className="space-y-2">
+                <label className="text-xs font-semibold tracking-widest text-slate-400 uppercase">Network</label>
+                <select 
+                  value={selectedNetwork}
+                  onChange={(e) => setSelectedNetwork(e.target.value)}
+                  className="w-full rounded-lg bg-slate-800/50 border border-slate-700 text-white px-4 py-3 focus:outline-none focus:border-emerald-500/50 transition"
+                >
+                  <option value="all">All Networks</option>
+                  <option value="sepolia">Base Sepolia</option>
+                  <option value="mainnet">Base Mainnet</option>
+                </select>
+              </div>
 
-        {errorMessage && (
-          <div className="mb-6 rounded-xl bg-red-50 px-4 py-3 text-red-700 dark:bg-red-900/40 dark:text-red-200">
-            {errorMessage}
-          </div>
-        )}
-
-        {!loading && !errorMessage && properties.length === 0 && (
-          <div className="text-slate-600 dark:text-slate-300">No properties available yet.</div>
-        )}
-
-        <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
-          {properties.map((property) => {
-            const campaign = campaignByPropertyId[property.propertyId];
-            const countdown =
-              campaign?.state === 'ACTIVE' && campaign.startTime
-                ? formatCountdown(campaign.startTime, nowMs)
-                : null;
-
-            return (
-              <div
-                key={property.propertyId}
-                className="overflow-hidden rounded-2xl border border-white/70 bg-white/85 shadow-xl shadow-slate-200/35 backdrop-blur transition hover:-translate-y-1 hover:shadow-2xl dark:border-white/10 dark:bg-slate-900/70 dark:shadow-black/35"
-              >
-                {property.imageUrl || property.imageUrls?.[0] ? (
-                  <img
-                    src={property.imageUrl || property.imageUrls?.[0]}
-                    alt={property.name}
-                    className="h-52 w-full object-cover"
-                    loading="lazy"
+              {/* Search */}
+              <div className="space-y-2 md:col-span-2 lg:col-span-1">
+                <label className="text-xs font-semibold tracking-widest text-slate-400 uppercase">Search</label>
+                <div className="relative">
+                  <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
+                  <input
+                    type="text"
+                    placeholder="Search properties..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full rounded-lg bg-slate-800/50 border border-slate-700 text-white px-4 py-3 pl-10 placeholder:text-slate-500 focus:outline-none focus:border-emerald-500/50 transition"
                   />
-                ) : (
-                  <div className="flex h-52 items-center justify-center bg-slate-200 text-sm text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                    No image
-                  </div>
-                )}
-                <div className="p-6">
-                  {countdown && (
-                    <div className="mb-3 inline-flex rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
-                      Starts in {countdown}
-                    </div>
-                  )}
-                  <h3 className="mb-2 text-xl font-semibold text-slate-900 dark:text-white">
-                    {property.name}
-                  </h3>
-                  <p className="mb-4 line-clamp-3 text-slate-600 dark:text-slate-300">
-                    {property.description}
-                  </p>
-                  <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">
-                    Platform fee:{' '}
-                    {property.platformFeeBps === null
-                      ? 'Not available'
-                      : `${(property.platformFeeBps / 100).toFixed(2)}%`}
-                  </p>
-                  <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">
-                    Est. sell price:{' '}
-                    {property.estimatedSellUsdcBaseUnits
-                      ? `$${(Number(property.estimatedSellUsdcBaseUnits) / 1_000_000).toLocaleString()} USDC`
-                      : 'Not set'}
-                  </p>
-                  {property.estimatedSellUsdcBaseUnits && (
-                    <p className="mb-3 text-xs text-emerald-700 dark:text-emerald-300">
-                      Projected upside:{' '}
-                      {(
-                        ((Number(property.estimatedSellUsdcBaseUnits) -
-                          Number(property.targetUsdcBaseUnits)) /
-                          Number(property.targetUsdcBaseUnits || '1')) *
-                        100
-                      ).toLocaleString(undefined, { maximumFractionDigits: 2 })}
-                      %
-                    </p>
-                  )}
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm text-slate-500 dark:text-slate-400">
-                      Target: ${(Number(property.targetUsdcBaseUnits) / 1_000_000).toLocaleString()} USDC
-                    </span>
-                    <Link
-                      to={`/properties/${property.propertyId}`}
-                      className="rounded-lg bg-primary-600 px-4 py-2 text-white transition hover:bg-primary-700"
-                    >
-                      View Details
-                    </Link>
-                  </div>
                 </div>
               </div>
-            );
-          })}
+
+              {/* Status Filter */}
+              <div className="space-y-2">
+                <label className="text-xs font-semibold tracking-widest text-slate-400 uppercase">Status</label>
+                <select 
+                  value={selectedStatus}
+                  onChange={(e) => setSelectedStatus(e.target.value)}
+                  className="w-full rounded-lg bg-slate-800/50 border border-slate-700 text-white px-4 py-3 focus:outline-none focus:border-emerald-500/50 transition"
+                >
+                  <option value="all">All Status</option>
+                  <option value="not_started">Upcoming</option>
+                  <option value="active">Live Funding</option>
+                  <option value="funded">Funded</option>
+                  <option value="failed">Failed</option>
+                  <option value="ended">Closed</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          {/* Error State */}
+          {errorMessage && (
+            <div className="mb-8 rounded-xl bg-red-500/10 border border-red-500/30 px-6 py-4 flex gap-3">
+              <div className="w-5 h-5 rounded-full bg-red-500/20 flex-shrink-0 flex items-center justify-center mt-0.5">
+                <span className="text-red-400 text-xs font-bold">!</span>
+              </div>
+              <p className="text-red-200 text-sm">{errorMessage}</p>
+            </div>
+          )}
+
+          {/* Loading State */}
+          {loading && (
+            <div className="flex items-center justify-center py-20">
+              <div className="text-center">
+                <div className="w-12 h-12 rounded-full border-2 border-slate-700 border-t-emerald-500 animate-spin mx-auto mb-4" />
+                <p className="text-slate-400">Loading properties...</p>
+              </div>
+            </div>
+          )}
+
+          {/* Empty State */}
+          {!loading && !errorMessage && filteredProperties.length === 0 && (
+            <div className="rounded-2xl bg-slate-900/80 backdrop-blur border border-slate-700/50 p-12 text-center">
+              <p className="text-slate-400 text-lg">
+                {properties.length === 0 ? 'No properties available yet.' : 'No properties match your filters.'}
+              </p>
+            </div>
+          )}
+
+          {/* Properties Grid */}
+          {!loading && (
+            <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+              {filteredProperties.map((property) => {
+                const campaign = campaignByPropertyId[property.propertyId];
+                const targetUsdc = toUsdcNumber(campaign?.targetUsdcBaseUnits ?? property.targetUsdcBaseUnits);
+                const raisedUsdc = toUsdcNumber(campaign?.raisedUsdcBaseUnits);
+                const fundingPercent =
+                  targetUsdc > 0 ? Math.max(0, Math.min(100, (raisedUsdc / targetUsdc) * 100)) : 0;
+                const fundingPhase = getPropertyFundingPhase(campaign, nowMs);
+                const countdown =
+                  fundingPhase === 'NOT_STARTED' && campaign?.startTime
+                    ? formatCountdown(campaign.startTime, nowMs)
+                    : null;
+
+                return (
+                  <div
+                    key={property.propertyId}
+                    className="group relative rounded-2xl overflow-hidden bg-slate-900/80 backdrop-blur border border-slate-700/50 transition-all duration-300 hover:border-emerald-500/50 hover:shadow-2xl hover:shadow-emerald-500/10"
+                  >
+                    {/* Image Container */}
+                    <div className="relative h-48 overflow-hidden bg-slate-800">
+                      {property.imageUrl || property.imageUrls?.[0] ? (
+                        <img
+                          src={property.imageUrl || property.imageUrls?.[0]}
+                          alt={property.name}
+                          className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
+                          loading="lazy"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-slate-800 to-slate-900">
+                          <div className="text-center">
+                            <div className="w-12 h-12 rounded-lg bg-slate-700/50 flex items-center justify-center mx-auto mb-2">
+                              <svg className="w-6 h-6 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                              </svg>
+                            </div>
+                            <p className="text-slate-500 text-sm">No image available</p>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Countdown Badge */}
+                      {countdown && (
+                        <div className="absolute top-3 right-3">
+                          <div className="flex items-center gap-2 bg-gradient-to-r from-blue-500/20 to-emerald-500/20 backdrop-blur border border-emerald-500/30 rounded-full px-4 py-2">
+                            <Clock className="w-4 h-4 text-emerald-400" />
+                            <span className="text-xs font-semibold text-emerald-300">{countdown}</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Status Badge */}
+                      {campaign && (
+                        <div className="absolute top-3 left-3">
+                          <div className="px-3 py-1 rounded-full text-xs font-semibold bg-blue-500/20 border border-blue-500/30 text-blue-300">
+                            {fundingPhase}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Content */}
+                    <div className="p-6 space-y-4">
+                      <div>
+                        <h3 className="text-lg font-semibold text-white mb-2 line-clamp-2">
+                          {property.name}
+                        </h3>
+                        <p className="text-slate-400 text-sm line-clamp-2">
+                          {property.description}
+                        </p>
+                      </div>
+
+                      {/* Stats */}
+                      <div className="space-y-2 py-4 border-t border-slate-700/50">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-slate-500">Target</span>
+                          <span className="text-sm font-semibold text-white">
+                            ${targetUsdc.toLocaleString()} USDC
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-slate-500">Raised</span>
+                          <span className="text-sm font-semibold text-emerald-300">
+                            ${raisedUsdc.toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC
+                          </span>
+                        </div>
+                        <div>
+                          <div className="mb-1 flex items-center justify-between text-xs">
+                            <span className="text-slate-500">Funding Progress</span>
+                            <span className="text-slate-300">{fundingPercent.toFixed(1)}%</span>
+                          </div>
+                          <div className="h-2 rounded-full bg-slate-800">
+                            <div
+                              className="h-full rounded-full bg-emerald-500 transition-all duration-500"
+                              style={{ width: `${fundingPercent}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {property.estimatedSellUsdcBaseUnits && (
+                          <>
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs text-slate-500">Est. Sell Price</span>
+                              <span className="text-sm font-semibold text-white">
+                                ${(Number(property.estimatedSellUsdcBaseUnits) / 1_000_000).toLocaleString()} USDC
+                              </span>
+                            </div>
+
+                            <div className="flex items-center justify-between pt-2">
+                              <span className="text-xs text-slate-500">Projected Upside</span>
+                              <div className="flex items-center gap-1">
+                                <TrendingUp className="w-4 h-4 text-emerald-400" />
+                                <span className="text-sm font-semibold text-emerald-400">
+                                  {(
+                                    ((Number(property.estimatedSellUsdcBaseUnits) -
+                                      Number(property.targetUsdcBaseUnits)) /
+                                      Number(property.targetUsdcBaseUnits || '1')) *
+                                    100
+                                  ).toLocaleString(undefined, { maximumFractionDigits: 1 })}
+                                  %
+                                </span>
+                              </div>
+                            </div>
+                          </>
+                        )}
+
+                        {property.platformFeeBps !== null && (
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-slate-500">Platform Fee</span>
+                            <span className="text-slate-400">{(property.platformFeeBps / 100).toFixed(2)}%</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* CTA */}
+                      <Link
+                        to={`/properties/${property.propertyId}`}
+                        className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 bg-emerald-600 text-white font-medium rounded-lg hover:shadow-lg hover:shadow-emerald-500/20 transition-all group/btn"
+                      >
+                        View Details
+                        <ChevronRight className="w-4 h-4 group-hover/btn:translate-x-1 transition-transform" />
+                      </Link>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
+
+      {/* Animation Styles */}
+      <style>{`
+        @keyframes pulse {
+          0%, 100% {
+            opacity: 1;
+          }
+          50% {
+            opacity: 0.5;
+          }
+        }
+
+        .animate-pulse {
+          animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+      `}</style>
     </div>
   );
 }

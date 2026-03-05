@@ -48,6 +48,7 @@ export interface PlatformFeeIntentPayload {
   campaignAddress: string;
   platformFeeBps: number;
   platformFeeRecipient?: string | null;
+  usdcAmountBaseUnits?: string | null;
 }
 
 export interface ProfitDistributionIntentPayload {
@@ -67,6 +68,7 @@ export interface AdminIntentBatchPayload {
   campaignAddress?: string;
   platformFeeBps?: number;
   platformFeeRecipient?: string | null;
+  platformFeeUsdcAmountBaseUnits?: string | null;
 }
 
 export interface ProfitAllowanceApprovalPayload {
@@ -132,6 +134,7 @@ export interface PlatformFeeIntentResponse {
   campaignAddress: string;
   platformFeeBps: number;
   platformFeeRecipient: string | null;
+  usdcAmountBaseUnits: string | null;
   status: IntentStatus;
   txHash: string | null;
   errorMessage: string | null;
@@ -225,12 +228,26 @@ export interface ProfitClaimResponse {
 export interface InvestorProfitStatusResponse {
   propertyId: string;
   profitDistributorAddress: string;
+  campaignAddress: string | null;
+  campaignState: string | null;
+  equityTokenAddress: string | null;
+  contributedBaseUnits: string;
+  equityClaimedBaseUnits: string;
   totalDepositedBaseUnits: string;
   totalClaimedBaseUnits: string;
   unclaimedPoolBaseUnits: string;
   lastDepositAt: string | null;
   claimableBaseUnits: string | null;
   claimableError: string | null;
+  equityWalletBalanceBaseUnits: string | null;
+  claimableTokensBaseUnits: string | null;
+  claimableTokensError: string | null;
+  diagnostics: {
+    profitReady: boolean;
+    equityReady: boolean;
+    profitReasons: string[];
+    equityReasons: string[];
+  };
 }
 
 export interface EthUsdcQuoteResponse {
@@ -400,6 +417,56 @@ export interface PlatformFeeFlowStatusResponse {
   };
 }
 
+export interface CampaignLifecyclePreflightResponse {
+  campaignAddress: string;
+  chainId: number;
+  operatorAddress: string | null;
+  contractOwner: string;
+  usdcTokenAddress: string;
+  campaign: {
+    state: 'ACTIVE' | 'SUCCESS' | 'FAILED' | 'WITHDRAWN';
+    stateIndex: number;
+    targetUsdcBaseUnits: string;
+    raisedUsdcBaseUnits: string;
+    campaignUsdcBalanceBaseUnits: string;
+    startTime: number;
+    endTime: number;
+    isTargetReached: boolean;
+    isEnded: boolean;
+  };
+  checks: {
+    operatorConfigured: boolean;
+    ownerMatchesOperator: boolean;
+    canFinalizeNow: boolean;
+    canWithdrawNow: boolean;
+    indexerHealthy: boolean;
+    workersHealthy: boolean;
+  };
+  actions: {
+    finalize: {
+      ready: boolean;
+      reasons: string[];
+    };
+    withdraw: {
+      ready: boolean;
+      reasons: string[];
+    };
+  };
+  observability: {
+    indexerLastBlock: number;
+    staleSubmittedIntents: number;
+  };
+}
+
+export interface CampaignLifecycleActionResponse {
+  campaignAddress: string;
+  chainId: number;
+  txHash: string;
+  operatorAddress: string;
+  nextState: string;
+  recipient?: string;
+}
+
 export interface ProfitAllowanceApprovalResponse {
   propertyId: string;
   chainId: number;
@@ -551,6 +618,7 @@ export async function createPlatformFeeIntent(
       campaignAddress: payload.campaignAddress,
       platformFeeBps: payload.platformFeeBps,
       platformFeeRecipient: payload.platformFeeRecipient ?? null,
+      usdcAmountBaseUnits: payload.usdcAmountBaseUnits ?? null,
     }),
   });
 
@@ -634,6 +702,7 @@ export async function createAdminIntentBatch(
       campaignAddress: payload.campaignAddress,
       platformFeeBps: payload.platformFeeBps,
       platformFeeRecipient: payload.platformFeeRecipient ?? null,
+      platformFeeUsdcAmountBaseUnits: payload.platformFeeUsdcAmountBaseUnits ?? null,
     }),
   });
 
@@ -829,6 +898,76 @@ export async function fetchPlatformFeeFlowStatus(
       .json()
       .catch(() => ({ error: 'Failed to fetch platform fee flow status' }));
     throw new Error(error.error || 'Failed to fetch platform fee flow status');
+  }
+  return response.json();
+}
+
+export async function fetchCampaignLifecyclePreflight(
+  token: string,
+  campaignAddress: string
+): Promise<CampaignLifecyclePreflightResponse> {
+  const search = new URLSearchParams({
+    campaignAddress,
+  });
+  const response = await fetch(`${API_V1_BASE}/admin/campaigns/preflight?${search.toString()}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ error: 'Failed to fetch campaign lifecycle preflight' }));
+    throw new Error(error.error || 'Failed to fetch campaign lifecycle preflight');
+  }
+  return response.json();
+}
+
+export async function finalizeCampaignAdmin(
+  token: string,
+  payload: { campaignAddress: string; chainId?: number }
+): Promise<CampaignLifecycleActionResponse> {
+  const response = await fetch(`${API_V1_BASE}/admin/campaigns/finalize`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      chainId: payload.chainId ?? 84532,
+      campaignAddress: payload.campaignAddress,
+    }),
+  });
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ error: 'Failed to finalize campaign' }));
+    throw new Error(error.error || 'Failed to finalize campaign');
+  }
+  return response.json();
+}
+
+export async function withdrawCampaignFundsAdmin(
+  token: string,
+  payload: { campaignAddress: string; recipient: string; chainId?: number }
+): Promise<CampaignLifecycleActionResponse> {
+  const response = await fetch(`${API_V1_BASE}/admin/campaigns/withdraw`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      chainId: payload.chainId ?? 84532,
+      campaignAddress: payload.campaignAddress,
+      recipient: payload.recipient,
+    }),
+  });
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ error: 'Failed to withdraw campaign funds' }));
+    throw new Error(error.error || 'Failed to withdraw campaign funds');
   }
   return response.json();
 }

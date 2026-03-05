@@ -1,4 +1,4 @@
-import { Interface, JsonRpcProvider, NonceManager, Wallet, ZeroAddress } from 'ethers';
+import { Contract, Interface, JsonRpcProvider, NonceManager, Wallet, ZeroAddress } from 'ethers';
 import { QueryTypes } from 'sequelize';
 
 process.env.NODE_ENV = process.env.NODE_ENV || 'production';
@@ -32,7 +32,12 @@ const baseSigner = new Wallet(operatorKey, provider);
 const signer = new NonceManager(baseSigner);
 const crowdfundInterface = new Interface([
   'function setPlatformFee(uint16 feeBps, address recipient)',
+  'function usdcToken() view returns (address)',
 ]);
+const erc20Abi = [
+  'function transfer(address to, uint256 amount) returns (bool)',
+  'function balanceOf(address account) view returns (uint256)',
+];
 
 if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) {
   throw new Error('PLATFORM_FEE_INTENT_MAX_ATTEMPTS must be a positive integer');
@@ -66,6 +71,7 @@ const loadPendingIntents = async () =>
       LOWER(campaign_address) AS "campaignAddress",
       platform_fee_bps AS "platformFeeBps",
       LOWER(platform_fee_recipient) AS "platformFeeRecipient",
+      usdc_amount_base_units::text AS "usdcAmountBaseUnits",
       attempt_count AS "attemptCount"
     FROM platform_fee_intents
     WHERE status IN ('pending', 'failed')
@@ -140,6 +146,7 @@ const processIntent = async (intent) => {
     intent.platformFeeBps > 0
       ? intent.platformFeeRecipient || ZeroAddress
       : intent.platformFeeRecipient || ZeroAddress;
+  const transferAmount = BigInt(intent.usdcAmountBaseUnits ?? '0');
 
   const data = crowdfundInterface.encodeFunctionData('setPlatformFee', [
     intent.platformFeeBps,
@@ -168,7 +175,51 @@ const processIntent = async (intent) => {
   await markSubmitted(intent.id, tx.hash);
   const receipt = await tx.wait();
   if (!receipt || Number(receipt.status) !== 1) {
-    throw new Error('Transaction reverted');
+    throw new Error('setPlatformFee transaction reverted');
+  }
+
+  if (transferAmount > 0n) {
+    if (!recipient || recipient === ZeroAddress) {
+      throw new Error('platform fee transfer requires non-zero recipient');
+    }
+
+    const usdcTokenData = crowdfundInterface.encodeFunctionData('usdcToken', []);
+    const usdcTokenRaw = await provider.call({
+      to: intent.campaignAddress,
+      data: usdcTokenData,
+    });
+    const [usdcTokenAddress] = crowdfundInterface.decodeFunctionResult('usdcToken', usdcTokenRaw);
+    const usdc = new Contract(String(usdcTokenAddress).toLowerCase(), erc20Abi, signer);
+    const operatorBalance = await usdc.balanceOf(baseSigner.address);
+    if (operatorBalance < transferAmount) {
+      throw new Error(
+        `insufficient operator USDC balance for platform fee transfer: required=${transferAmount.toString()} balance=${operatorBalance.toString()}`
+      );
+    }
+
+    let transferTx;
+    try {
+      transferTx = await usdc.transfer(recipient, transferAmount);
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      if (message.includes('nonce has already been used') || message.includes('nonce too low')) {
+        signer.reset();
+        transferTx = await usdc.transfer(recipient, transferAmount);
+      } else {
+        throw error;
+      }
+    }
+    await markSubmitted(intent.id, transferTx.hash);
+    const transferReceipt = await transferTx.wait();
+    if (!transferReceipt || Number(transferReceipt.status) !== 1) {
+      throw new Error('platform fee transfer reverted');
+    }
+
+    await markConfirmed(intent.id);
+    console.log(
+      `confirmed intent=${intent.id} campaign=${intent.campaignAddress} setPlatformFeeTx=${tx.hash} transferTx=${transferTx.hash} recipient=${recipient} amount=${transferAmount.toString()}`
+    );
+    return;
   }
 
   await markConfirmed(intent.id);

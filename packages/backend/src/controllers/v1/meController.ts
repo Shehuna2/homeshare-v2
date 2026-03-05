@@ -64,6 +64,11 @@ type ProfitClaimRow = {
 type ProfitStatusRow = {
   propertyId: string;
   profitDistributorAddress: string;
+  campaignAddress: string | null;
+  campaignState: string | null;
+  equityTokenAddress: string | null;
+  contributedBaseUnits: string;
+  equityClaimedBaseUnits: string;
   totalDepositedBaseUnits: string;
   totalClaimedBaseUnits: string;
   unclaimedPoolBaseUnits: string;
@@ -72,6 +77,12 @@ type ProfitStatusRow = {
 
 const distributorReadInterface = new Interface([
   'function claimable(address user) view returns (uint256)',
+]);
+const crowdfundReadInterface = new Interface([
+  'function claimableTokens(address investor) view returns (uint256)',
+]);
+const erc20ReadInterface = new Interface([
+  'function balanceOf(address account) view returns (uint256)',
 ]);
 
 export const listMyInvestments = async (req: AuthenticatedRequest, res: Response) => {
@@ -266,20 +277,57 @@ export const listMyProfitStatus = async (req: AuthenticatedRequest, res: Respons
     const rows: ProfitStatusRow[] = await sequelize.query<ProfitStatusRow>(
       `
       WITH invested AS (
-        SELECT DISTINCT p.id, p.property_id, LOWER(p.profit_distributor_address) AS profit_distributor_address
+        SELECT DISTINCT
+          p.id,
+          p.property_id,
+          LOWER(p.profit_distributor_address) AS profit_distributor_address,
+          LOWER(p.crowdfund_contract_address) AS campaign_address,
+          LOWER(p.equity_token_address) AS equity_token_address,
+          c.state AS campaign_state
         FROM campaign_investments ci
         JOIN properties p ON p.id = ci.property_id
+        LEFT JOIN campaigns c
+          ON c.property_id = p.id
+         AND c.chain_id = :chainId
         WHERE ci.chain_id = :chainId
           AND ci.investor_address = :investorAddress
       )
       SELECT
         invested.property_id AS "propertyId",
         invested.profit_distributor_address AS "profitDistributorAddress",
+        invested.campaign_address AS "campaignAddress",
+        invested.campaign_state AS "campaignState",
+        invested.equity_token_address AS "equityTokenAddress",
+        COALESCE(contrib.total_contributed, 0)::text AS "contributedBaseUnits",
+        COALESCE(eqc.total_claimed, 0)::text AS "equityClaimedBaseUnits",
         COALESCE(dep.total_deposited, 0)::text AS "totalDepositedBaseUnits",
         COALESCE(clm.total_claimed, 0)::text AS "totalClaimedBaseUnits",
         (COALESCE(dep.total_deposited, 0) - COALESCE(clm.total_claimed, 0))::text AS "unclaimedPoolBaseUnits",
         dep.last_deposit_at AS "lastDepositAt"
       FROM invested
+      LEFT JOIN LATERAL (
+        SELECT
+          COALESCE(SUM(ci.usdc_amount_base_units), 0)
+          -
+          COALESCE((
+            SELECT SUM(cr.usdc_amount_base_units)
+            FROM campaign_refunds cr
+            WHERE cr.chain_id = :chainId
+              AND cr.property_id = invested.id
+              AND cr.investor_address = :investorAddress
+          ), 0) AS total_contributed
+        FROM campaign_investments ci
+        WHERE ci.chain_id = :chainId
+          AND ci.property_id = invested.id
+          AND ci.investor_address = :investorAddress
+      ) contrib ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT SUM(ec.equity_amount_base_units) AS total_claimed
+        FROM equity_claims ec
+        WHERE ec.chain_id = :chainId
+          AND ec.property_id = invested.id
+          AND ec.claimant_address = :investorAddress
+      ) eqc ON TRUE
       LEFT JOIN LATERAL (
         SELECT
           SUM(pd.usdc_amount_base_units) AS total_deposited,
@@ -312,6 +360,15 @@ export const listMyProfitStatus = async (req: AuthenticatedRequest, res: Respons
           ...row,
           claimableBaseUnits: null,
           claimableError: 'RPC unavailable',
+          equityWalletBalanceBaseUnits: null,
+          claimableTokensBaseUnits: null,
+          claimableTokensError: 'RPC unavailable',
+          diagnostics: {
+            profitReady: false,
+            equityReady: false,
+            profitReasons: ['rpc-unavailable'],
+            equityReasons: ['rpc-unavailable'],
+          },
         })),
       });
     }
@@ -319,6 +376,19 @@ export const listMyProfitStatus = async (req: AuthenticatedRequest, res: Respons
     const provider = new JsonRpcProvider(rpcUrl);
     const statuses = await Promise.all(
       rows.map(async (row) => {
+        const profitReasons: string[] = [];
+        const equityReasons: string[] = [];
+        const totalDeposited = BigInt(row.totalDepositedBaseUnits || '0');
+        const totalClaimed = BigInt(row.totalClaimedBaseUnits || '0');
+        const unclaimedPool = BigInt(row.unclaimedPoolBaseUnits || '0');
+        const contributed = BigInt(row.contributedBaseUnits || '0');
+
+        let claimableBaseUnits: string | null = null;
+        let claimableError: string | null = null;
+        let equityWalletBalanceBaseUnits: string | null = null;
+        let claimableTokensBaseUnits: string | null = null;
+        let claimableTokensError: string | null = null;
+
         try {
           const data = distributorReadInterface.encodeFunctionData('claimable', [investorAddress]);
           const raw = await provider.call({
@@ -326,18 +396,99 @@ export const listMyProfitStatus = async (req: AuthenticatedRequest, res: Respons
             data,
           });
           const [claimable] = distributorReadInterface.decodeFunctionResult('claimable', raw);
-          return {
-            ...row,
-            claimableBaseUnits: claimable.toString(),
-            claimableError: null,
-          };
+          claimableBaseUnits = claimable.toString();
         } catch (error) {
-          return {
-            ...row,
-            claimableBaseUnits: null,
-            claimableError: error instanceof Error ? error.message : 'claimable-read-failed',
-          };
+          claimableError = error instanceof Error ? error.message : 'claimable-read-failed';
         }
+
+        if (row.equityTokenAddress) {
+          try {
+            const balanceData = erc20ReadInterface.encodeFunctionData('balanceOf', [investorAddress]);
+            const balanceRaw = await provider.call({
+              to: row.equityTokenAddress,
+              data: balanceData,
+            });
+            const [balance] = erc20ReadInterface.decodeFunctionResult('balanceOf', balanceRaw);
+            equityWalletBalanceBaseUnits = balance.toString();
+          } catch (_error) {
+            equityWalletBalanceBaseUnits = null;
+          }
+        }
+
+        if (row.campaignAddress) {
+          try {
+            const claimableTokensData = crowdfundReadInterface.encodeFunctionData('claimableTokens', [
+              investorAddress,
+            ]);
+            const claimableTokensRaw = await provider.call({
+              to: row.campaignAddress,
+              data: claimableTokensData,
+            });
+            const [claimableTokens] = crowdfundReadInterface.decodeFunctionResult(
+              'claimableTokens',
+              claimableTokensRaw
+            );
+            claimableTokensBaseUnits = claimableTokens.toString();
+          } catch (error) {
+            claimableTokensError =
+              error instanceof Error ? error.message : 'claimable-tokens-read-failed';
+          }
+        }
+
+        if (!row.profitDistributorAddress) {
+          profitReasons.push('missing-profit-distributor');
+        }
+        if (totalDeposited <= 0n) {
+          profitReasons.push('no-profit-deposits');
+        }
+        if (unclaimedPool <= 0n || totalClaimed >= totalDeposited) {
+          profitReasons.push('no-unclaimed-profit-pool');
+        }
+        if (equityWalletBalanceBaseUnits !== null && BigInt(equityWalletBalanceBaseUnits) <= 0n) {
+          profitReasons.push('no-equity-balance');
+        }
+        if (claimableError) {
+          profitReasons.push('profit-claimable-read-failed');
+        } else if (claimableBaseUnits !== null && BigInt(claimableBaseUnits) <= 0n) {
+          profitReasons.push('no-profit-claimable');
+        }
+
+        const campaignState = (row.campaignState || '').toUpperCase();
+        if (campaignState !== 'SUCCESS' && campaignState !== 'WITHDRAWN') {
+          equityReasons.push('campaign-not-successful');
+        }
+        if (!row.equityTokenAddress) {
+          equityReasons.push('equity-token-not-set');
+        }
+        if (contributed <= 0n) {
+          equityReasons.push('no-contribution');
+        }
+        if (claimableTokensError) {
+          equityReasons.push('equity-claimable-read-failed');
+        } else if (claimableTokensBaseUnits !== null && BigInt(claimableTokensBaseUnits) <= 0n) {
+          equityReasons.push('no-equity-claimable');
+        }
+
+        return {
+          ...row,
+          claimableBaseUnits,
+          claimableError,
+          equityWalletBalanceBaseUnits,
+          claimableTokensBaseUnits,
+          claimableTokensError,
+          diagnostics: {
+            profitReady:
+              !claimableError &&
+              claimableBaseUnits !== null &&
+              BigInt(claimableBaseUnits) > 0n,
+            equityReady:
+              !claimableTokensError &&
+              claimableTokensBaseUnits !== null &&
+              BigInt(claimableTokensBaseUnits) > 0n,
+            profitReasons,
+            equityReasons,
+          },
+        };
       })
     );
 

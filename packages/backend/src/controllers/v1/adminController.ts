@@ -206,9 +206,19 @@ const profitReadInterface = new Interface([
 ]);
 const crowdfundReadInterface = new Interface([
   'function owner() view returns (address)',
+  'function state() view returns (uint8)',
+  'function targetAmountUSDC() view returns (uint256)',
+  'function raisedAmountUSDC() view returns (uint256)',
+  'function startTime() view returns (uint256)',
+  'function endTime() view returns (uint256)',
+  'function usdcToken() view returns (address)',
   'function platformFeeBps() view returns (uint16)',
   'function platformFeeRecipient() view returns (address)',
 ]);
+const crowdfundWriteAbi = [
+  'function finalizeCampaign()',
+  'function withdrawFunds(address to)',
+];
 
 const erc20ReadInterface = new Interface([
   'function balanceOf(address account) view returns (uint256)',
@@ -270,6 +280,32 @@ const getOperatorPrivateKey = (): string | null => {
   } catch {
     return null;
   }
+};
+
+const getPlatformOperatorPrivateKey = (): string | null => {
+  const key =
+    process.env.PLATFORM_OPERATOR_PRIVATE_KEY ||
+    process.env.PROFIT_OPERATOR_PRIVATE_KEY ||
+    process.env.PRIVATE_KEY ||
+    '';
+  const ZERO_PRIVATE_KEY =
+    '0x0000000000000000000000000000000000000000000000000000000000000000';
+  if (!key || key === ZERO_PRIVATE_KEY) {
+    return null;
+  }
+  try {
+    void new Wallet(key);
+    return key;
+  } catch {
+    return null;
+  }
+};
+
+const decodeCrowdfundState = (stateIndex: number): 'ACTIVE' | 'SUCCESS' | 'FAILED' | 'WITHDRAWN' => {
+  if (stateIndex === 1) return 'SUCCESS';
+  if (stateIndex === 2) return 'FAILED';
+  if (stateIndex === 3) return 'WITHDRAWN';
+  return 'ACTIVE';
 };
 
 export const createPropertyIntent = async (req: AuthenticatedRequest, res: Response) => {
@@ -522,6 +558,15 @@ export const createPlatformFeeIntent = async (req: AuthenticatedRequest, res: Re
       platformFeeBps === 0
         ? null
         : normalizeAddress(recipientRaw?.toString(), 'platformFeeRecipient');
+    const usdcAmountBaseUnits =
+      req.body.usdcAmountBaseUnits === undefined || req.body.usdcAmountBaseUnits === null
+        ? null
+        : parseBaseUnits(req.body.usdcAmountBaseUnits, 'usdcAmountBaseUnits');
+    if (usdcAmountBaseUnits !== null && usdcAmountBaseUnits !== '0' && !platformFeeRecipient) {
+      throw new ValidationError(
+        'platformFeeRecipient is required when usdcAmountBaseUnits is greater than 0'
+      );
+    }
 
     const [rows] = await sequelize.query(
       `
@@ -531,6 +576,7 @@ export const createPlatformFeeIntent = async (req: AuthenticatedRequest, res: Re
         campaign_address,
         platform_fee_bps,
         platform_fee_recipient,
+        usdc_amount_base_units,
         created_by_address
       )
       VALUES (
@@ -539,12 +585,14 @@ export const createPlatformFeeIntent = async (req: AuthenticatedRequest, res: Re
         :campaignAddress,
         :platformFeeBps,
         :platformFeeRecipient,
+        :usdcAmountBaseUnits,
         :createdByAddress
       )
       RETURNING
         LOWER(campaign_address) AS "campaignAddress",
         platform_fee_bps AS "platformFeeBps",
         LOWER(platform_fee_recipient) AS "platformFeeRecipient",
+        usdc_amount_base_units::text AS "usdcAmountBaseUnits",
         status,
         tx_hash AS "txHash",
         error_message AS "errorMessage",
@@ -560,6 +608,7 @@ export const createPlatformFeeIntent = async (req: AuthenticatedRequest, res: Re
           campaignAddress,
           platformFeeBps,
           platformFeeRecipient,
+          usdcAmountBaseUnits,
           createdByAddress: adminAddress,
         },
       }
@@ -650,6 +699,19 @@ export const createIntentBatch = async (req: AuthenticatedRequest, res: Response
             platformFeeBps === 0
               ? null
               : normalizeAddress(recipientRaw?.toString(), 'platformFeeRecipient');
+          const usdcAmountBaseUnits =
+            req.body.platformFeeUsdcAmountBaseUnits === undefined ||
+            req.body.platformFeeUsdcAmountBaseUnits === null
+              ? null
+              : parseBaseUnits(
+                  req.body.platformFeeUsdcAmountBaseUnits,
+                  'platformFeeUsdcAmountBaseUnits'
+                );
+          if (usdcAmountBaseUnits !== null && usdcAmountBaseUnits !== '0' && !platformFeeRecipient) {
+            throw new ValidationError(
+              'platformFeeRecipient is required when usdcAmountBaseUnits is greater than 0'
+            );
+          }
           return {
             campaignAddress: normalizeAddress(
               req.body.campaignAddress?.toString(),
@@ -657,6 +719,7 @@ export const createIntentBatch = async (req: AuthenticatedRequest, res: Response
             ),
             platformFeeBps,
             platformFeeRecipient,
+            usdcAmountBaseUnits,
           };
         })()
       : null;
@@ -723,6 +786,7 @@ export const createIntentBatch = async (req: AuthenticatedRequest, res: Response
             campaign_address,
             platform_fee_bps,
             platform_fee_recipient,
+            usdc_amount_base_units,
             created_by_address
           )
           VALUES (
@@ -731,6 +795,7 @@ export const createIntentBatch = async (req: AuthenticatedRequest, res: Response
             :campaignAddress,
             :platformFeeBps,
             :platformFeeRecipient,
+            :usdcAmountBaseUnits,
             :createdByAddress
           )
           RETURNING
@@ -739,6 +804,7 @@ export const createIntentBatch = async (req: AuthenticatedRequest, res: Response
             LOWER(campaign_address) AS "campaignAddress",
             platform_fee_bps AS "platformFeeBps",
             LOWER(platform_fee_recipient) AS "platformFeeRecipient",
+            usdc_amount_base_units::text AS "usdcAmountBaseUnits",
             status,
             tx_hash AS "txHash",
             error_message AS "errorMessage",
@@ -755,6 +821,7 @@ export const createIntentBatch = async (req: AuthenticatedRequest, res: Response
               campaignAddress: platformPayload.campaignAddress,
               platformFeeBps: platformPayload.platformFeeBps,
               platformFeeRecipient: platformPayload.platformFeeRecipient,
+              usdcAmountBaseUnits: platformPayload.usdcAmountBaseUnits,
               createdByAddress: adminAddress,
             },
             transaction: tx,
@@ -889,6 +956,7 @@ export const listPlatformFeeIntents = async (req: AuthenticatedRequest, res: Res
         LOWER(campaign_address) AS "campaignAddress",
         platform_fee_bps AS "platformFeeBps",
         LOWER(platform_fee_recipient) AS "platformFeeRecipient",
+        usdc_amount_base_units::text AS "usdcAmountBaseUnits",
         status,
         tx_hash AS "txHash",
         error_message AS "errorMessage",
@@ -1535,6 +1603,7 @@ export const getPlatformFeeFlowStatus = async (req: AuthenticatedRequest, res: R
       txHash: string | null;
       platformFeeBps: number;
       platformFeeRecipient: string | null;
+      usdcAmountBaseUnits: string | null;
       createdAt: string;
     }>(
       `
@@ -1546,6 +1615,7 @@ export const getPlatformFeeFlowStatus = async (req: AuthenticatedRequest, res: R
         tx_hash AS "txHash",
         platform_fee_bps AS "platformFeeBps",
         LOWER(platform_fee_recipient) AS "platformFeeRecipient",
+        usdc_amount_base_units::text AS "usdcAmountBaseUnits",
         created_at AS "createdAt"
       FROM platform_fee_intents
       WHERE LOWER(campaign_address) = :campaignAddress
@@ -1606,6 +1676,288 @@ export const getPlatformFeeFlowStatus = async (req: AuthenticatedRequest, res: R
         platformFeeBps: targetBps,
         platformFeeRecipient: targetRecipient,
       },
+    });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
+export const getCampaignLifecyclePreflight = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    requireAdminAddress(req);
+    const campaignAddressRaw = req.query.campaignAddress?.toString();
+    if (!campaignAddressRaw) {
+      throw new ValidationError('Missing campaignAddress');
+    }
+    const campaignAddress = normalizeAddress(campaignAddressRaw, 'campaignAddress');
+
+    const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL || process.env.BASE_MAINNET_RPC_URL || '';
+    if (!rpcUrl) {
+      return sendError(res, 503, 'BASE_SEPOLIA_RPC_URL is not configured', 'service_unavailable');
+    }
+    const provider = new JsonRpcProvider(rpcUrl);
+    const operatorAddress = getPlatformOperatorAddress();
+
+    const [ownerRaw, stateRaw, targetRaw, raisedRaw, startRaw, endRaw, usdcRaw] = await Promise.all([
+      provider.call({
+        to: campaignAddress,
+        data: crowdfundReadInterface.encodeFunctionData('owner', []),
+      }),
+      provider.call({
+        to: campaignAddress,
+        data: crowdfundReadInterface.encodeFunctionData('state', []),
+      }),
+      provider.call({
+        to: campaignAddress,
+        data: crowdfundReadInterface.encodeFunctionData('targetAmountUSDC', []),
+      }),
+      provider.call({
+        to: campaignAddress,
+        data: crowdfundReadInterface.encodeFunctionData('raisedAmountUSDC', []),
+      }),
+      provider.call({
+        to: campaignAddress,
+        data: crowdfundReadInterface.encodeFunctionData('startTime', []),
+      }),
+      provider.call({
+        to: campaignAddress,
+        data: crowdfundReadInterface.encodeFunctionData('endTime', []),
+      }),
+      provider.call({
+        to: campaignAddress,
+        data: crowdfundReadInterface.encodeFunctionData('usdcToken', []),
+      }),
+    ]);
+
+    const [ownerAddress] = crowdfundReadInterface.decodeFunctionResult('owner', ownerRaw);
+    const [stateIndexRaw] = crowdfundReadInterface.decodeFunctionResult('state', stateRaw);
+    const [targetAmountRaw] = crowdfundReadInterface.decodeFunctionResult('targetAmountUSDC', targetRaw);
+    const [raisedAmountRaw] = crowdfundReadInterface.decodeFunctionResult('raisedAmountUSDC', raisedRaw);
+    const [startTimeRaw] = crowdfundReadInterface.decodeFunctionResult('startTime', startRaw);
+    const [endTimeRaw] = crowdfundReadInterface.decodeFunctionResult('endTime', endRaw);
+    const [usdcAddressRaw] = crowdfundReadInterface.decodeFunctionResult('usdcToken', usdcRaw);
+
+    const normalizedOwner = String(ownerAddress).toLowerCase();
+    const normalizedUsdcAddress = String(usdcAddressRaw).toLowerCase();
+    const stateIndex = Number(stateIndexRaw);
+    const state = decodeCrowdfundState(stateIndex);
+    const targetAmount = BigInt(targetAmountRaw);
+    const raisedAmount = BigInt(raisedAmountRaw);
+    const startTime = Number(startTimeRaw);
+    const endTime = Number(endTimeRaw);
+
+    const now = Math.floor(Date.now() / 1000);
+    const isTargetReached = raisedAmount >= targetAmount;
+    const isEnded = now >= endTime;
+
+    const erc20BalanceData = erc20ReadInterface.encodeFunctionData('balanceOf', [campaignAddress]);
+    const erc20BalanceRaw = await provider.call({ to: normalizedUsdcAddress, data: erc20BalanceData });
+    const [campaignBalanceRaw] = erc20ReadInterface.decodeFunctionResult('balanceOf', erc20BalanceRaw);
+    const campaignUsdcBalance = BigInt(campaignBalanceRaw);
+
+    const ownerMatchesOperator = operatorAddress !== null && normalizedOwner === operatorAddress;
+    const canFinalizeNow = state === 'ACTIVE' && (isTargetReached || isEnded);
+    const canWithdrawNow = state === 'SUCCESS' && campaignUsdcBalance > 0n;
+
+    const finalizeReasons: string[] = [];
+    if (!operatorAddress) finalizeReasons.push('operator-wallet-not-configured');
+    if (!ownerMatchesOperator) finalizeReasons.push('campaign-owner-not-operator');
+    if (state !== 'ACTIVE') finalizeReasons.push(`campaign-state-${state.toLowerCase()}`);
+    if (!(isTargetReached || isEnded)) finalizeReasons.push('campaign-not-finishable-yet');
+
+    const withdrawReasons: string[] = [];
+    if (!operatorAddress) withdrawReasons.push('operator-wallet-not-configured');
+    if (!ownerMatchesOperator) withdrawReasons.push('campaign-owner-not-operator');
+    if (state !== 'SUCCESS') withdrawReasons.push(`campaign-state-${state.toLowerCase()}`);
+    if (campaignUsdcBalance <= 0n) withdrawReasons.push('campaign-usdc-balance-zero');
+
+    const stateRows = await sequelize.query<{ last_block: string }>(
+      'SELECT last_block::text AS last_block FROM indexer_state WHERE chain_id = :chainId LIMIT 1',
+      {
+        type: QueryTypes.SELECT,
+        replacements: { chainId: BASE_SEPOLIA_CHAIN_ID },
+      }
+    );
+    const indexerLastBlock = stateRows[0] ? Number(stateRows[0].last_block) : 0;
+
+    const staleMinutes = 5;
+    const staleRows = await sequelize.query<{ count: string }>(
+      `
+      SELECT COUNT(*)::text AS count
+      FROM (
+        SELECT id, submitted_at FROM property_intents WHERE status = 'submitted'
+        UNION ALL
+        SELECT id, submitted_at FROM profit_distribution_intents WHERE status = 'submitted'
+        UNION ALL
+        SELECT id, submitted_at FROM platform_fee_intents WHERE status = 'submitted'
+      ) AS intents
+      WHERE submitted_at IS NOT NULL
+        AND submitted_at < NOW() - (:staleMinutes::text || ' minutes')::interval
+      `,
+      {
+        type: QueryTypes.SELECT,
+        replacements: { staleMinutes },
+      }
+    );
+    const staleSubmittedIntents = Number(staleRows[0] ? staleRows[0].count : '0');
+
+    return res.json({
+      campaignAddress,
+      chainId: BASE_SEPOLIA_CHAIN_ID,
+      operatorAddress,
+      contractOwner: normalizedOwner,
+      usdcTokenAddress: normalizedUsdcAddress,
+      campaign: {
+        state,
+        stateIndex,
+        targetUsdcBaseUnits: targetAmount.toString(),
+        raisedUsdcBaseUnits: raisedAmount.toString(),
+        campaignUsdcBalanceBaseUnits: campaignUsdcBalance.toString(),
+        startTime,
+        endTime,
+        isTargetReached,
+        isEnded,
+      },
+      checks: {
+        operatorConfigured: Boolean(operatorAddress),
+        ownerMatchesOperator,
+        canFinalizeNow,
+        canWithdrawNow,
+        indexerHealthy: indexerLastBlock > 0,
+        workersHealthy: staleSubmittedIntents === 0,
+      },
+      actions: {
+        finalize: {
+          ready: finalizeReasons.length === 0,
+          reasons: finalizeReasons,
+        },
+        withdraw: {
+          ready: withdrawReasons.length === 0,
+          reasons: withdrawReasons,
+        },
+      },
+      observability: {
+        indexerLastBlock,
+        staleSubmittedIntents,
+      },
+    });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
+export const finalizeCampaign = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    requireAdminAddress(req);
+    const chainId = validateChainId(req.body.chainId ?? BASE_SEPOLIA_CHAIN_ID);
+    const campaignAddress = normalizeAddress(req.body.campaignAddress?.toString(), 'campaignAddress');
+
+    const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL || process.env.BASE_MAINNET_RPC_URL || '';
+    if (!rpcUrl) {
+      return sendError(res, 503, 'BASE_SEPOLIA_RPC_URL is not configured', 'service_unavailable');
+    }
+    const operatorPrivateKey = getPlatformOperatorPrivateKey();
+    if (!operatorPrivateKey) {
+      return sendError(res, 503, 'Operator wallet is not configured', 'service_unavailable');
+    }
+
+    const provider = new JsonRpcProvider(rpcUrl);
+    const signer = new Wallet(operatorPrivateKey, provider);
+    const operatorAddress = signer.address.toLowerCase();
+
+    const ownerData = crowdfundReadInterface.encodeFunctionData('owner', []);
+    const ownerRaw = await provider.call({ to: campaignAddress, data: ownerData });
+    const [ownerAddress] = crowdfundReadInterface.decodeFunctionResult('owner', ownerRaw);
+    const normalizedOwner = String(ownerAddress).toLowerCase();
+    if (normalizedOwner !== operatorAddress) {
+      return sendError(
+        res,
+        409,
+        'Operator wallet does not own this campaign',
+        'bad_request'
+      );
+    }
+
+    const crowdfund = new Contract(campaignAddress, crowdfundWriteAbi, signer);
+    const tx = await crowdfund.finalizeCampaign();
+    const receipt = await tx.wait();
+    if (!receipt || receipt.status !== 1) {
+      return sendError(res, 500, 'Finalize transaction reverted', 'internal_error');
+    }
+
+    const stateRaw = await provider.call({
+      to: campaignAddress,
+      data: crowdfundReadInterface.encodeFunctionData('state', []),
+    });
+    const [stateIndexRaw] = crowdfundReadInterface.decodeFunctionResult('state', stateRaw);
+    const nextState = decodeCrowdfundState(Number(stateIndexRaw));
+
+    return res.json({
+      campaignAddress,
+      chainId,
+      txHash: tx.hash,
+      operatorAddress,
+      nextState,
+    });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
+export const withdrawCampaignFunds = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    requireAdminAddress(req);
+    const chainId = validateChainId(req.body.chainId ?? BASE_SEPOLIA_CHAIN_ID);
+    const campaignAddress = normalizeAddress(req.body.campaignAddress?.toString(), 'campaignAddress');
+    const recipient = normalizeAddress(req.body.recipient?.toString(), 'recipient');
+
+    const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL || process.env.BASE_MAINNET_RPC_URL || '';
+    if (!rpcUrl) {
+      return sendError(res, 503, 'BASE_SEPOLIA_RPC_URL is not configured', 'service_unavailable');
+    }
+    const operatorPrivateKey = getPlatformOperatorPrivateKey();
+    if (!operatorPrivateKey) {
+      return sendError(res, 503, 'Operator wallet is not configured', 'service_unavailable');
+    }
+
+    const provider = new JsonRpcProvider(rpcUrl);
+    const signer = new Wallet(operatorPrivateKey, provider);
+    const operatorAddress = signer.address.toLowerCase();
+
+    const ownerData = crowdfundReadInterface.encodeFunctionData('owner', []);
+    const ownerRaw = await provider.call({ to: campaignAddress, data: ownerData });
+    const [ownerAddress] = crowdfundReadInterface.decodeFunctionResult('owner', ownerRaw);
+    const normalizedOwner = String(ownerAddress).toLowerCase();
+    if (normalizedOwner !== operatorAddress) {
+      return sendError(
+        res,
+        409,
+        'Operator wallet does not own this campaign',
+        'bad_request'
+      );
+    }
+
+    const crowdfund = new Contract(campaignAddress, crowdfundWriteAbi, signer);
+    const tx = await crowdfund.withdrawFunds(recipient);
+    const receipt = await tx.wait();
+    if (!receipt || receipt.status !== 1) {
+      return sendError(res, 500, 'Withdraw transaction reverted', 'internal_error');
+    }
+
+    const stateRaw = await provider.call({
+      to: campaignAddress,
+      data: crowdfundReadInterface.encodeFunctionData('state', []),
+    });
+    const [stateIndexRaw] = crowdfundReadInterface.decodeFunctionResult('state', stateRaw);
+    const nextState = decodeCrowdfundState(Number(stateIndexRaw));
+
+    return res.json({
+      campaignAddress,
+      chainId,
+      recipient,
+      txHash: tx.hash,
+      operatorAddress,
+      nextState,
     });
   } catch (error) {
     return handleError(res, error);
