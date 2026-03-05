@@ -74,6 +74,85 @@ export const getAdminMetrics = async (_req: AuthenticatedRequest, res: Response)
       `,
       { type: QueryTypes.SELECT }
     );
+    const settlementRows = await sequelize.query<{
+      area: string;
+      pending: string;
+      submitted: string;
+      confirmed: string;
+      failed: string;
+    }>(
+      `
+      SELECT
+        'platform_fee_transfer'::text AS area,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)::text AS pending,
+        SUM(CASE WHEN status = 'submitted' THEN 1 ELSE 0 END)::text AS submitted,
+        SUM(CASE WHEN status = 'confirmed' THEN 1 ELSE 0 END)::text AS confirmed,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)::text AS failed
+      FROM platform_fee_intents
+      WHERE COALESCE(usdc_amount_base_units, 0) > 0
+      UNION ALL
+      SELECT
+        'profit_deposit'::text AS area,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)::text AS pending,
+        SUM(CASE WHEN status = 'submitted' THEN 1 ELSE 0 END)::text AS submitted,
+        SUM(CASE WHEN status = 'confirmed' THEN 1 ELSE 0 END)::text AS confirmed,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)::text AS failed
+      FROM profit_distribution_intents
+      `,
+      { type: QueryTypes.SELECT }
+    );
+    const anomalyRows = await sequelize.query<{
+      feeTransferStaleSubmitted: string;
+      profitDepositStaleSubmitted: string;
+      orphanedFeeTransfers: string;
+      settlementFailures24h: string;
+    }>(
+      `
+      WITH fee_stale AS (
+        SELECT COUNT(*)::text AS value
+        FROM platform_fee_intents
+        WHERE status = 'submitted'
+          AND COALESCE(usdc_amount_base_units, 0) > 0
+          AND submitted_at IS NOT NULL
+          AND submitted_at < NOW() - INTERVAL '5 minutes'
+      ),
+      profit_stale AS (
+        SELECT COUNT(*)::text AS value
+        FROM profit_distribution_intents
+        WHERE status = 'submitted'
+          AND submitted_at IS NOT NULL
+          AND submitted_at < NOW() - INTERVAL '5 minutes'
+      ),
+      orphaned_fee AS (
+        SELECT COUNT(*)::text AS value
+        FROM platform_fee_intents pfi
+        LEFT JOIN campaigns c ON LOWER(c.contract_address) = LOWER(pfi.campaign_address)
+        WHERE COALESCE(pfi.usdc_amount_base_units, 0) > 0
+          AND c.id IS NULL
+      ),
+      recent_failures AS (
+        SELECT COUNT(*)::text AS value
+        FROM (
+          SELECT id, created_at
+          FROM platform_fee_intents
+          WHERE status = 'failed'
+            AND COALESCE(usdc_amount_base_units, 0) > 0
+            AND created_at >= NOW() - INTERVAL '24 hours'
+          UNION ALL
+          SELECT id, created_at
+          FROM profit_distribution_intents
+          WHERE status = 'failed'
+            AND created_at >= NOW() - INTERVAL '24 hours'
+        ) x
+      )
+      SELECT
+        (SELECT value FROM fee_stale) AS "feeTransferStaleSubmitted",
+        (SELECT value FROM profit_stale) AS "profitDepositStaleSubmitted",
+        (SELECT value FROM orphaned_fee) AS "orphanedFeeTransfers",
+        (SELECT value FROM recent_failures) AS "settlementFailures24h"
+      `,
+      { type: QueryTypes.SELECT }
+    );
 
     const toCount = (tableName: string) => {
       const row = intentRows.find((entry) => entry.table_name === tableName);
@@ -87,6 +166,23 @@ export const getAdminMetrics = async (_req: AuthenticatedRequest, res: Response)
     const propertyIntents = toCount('property_intents');
     const profitIntents = toCount('profit_distribution_intents');
     const platformFeeIntents = toCount('platform_fee_intents');
+    const toSettlementCount = (area: string) => {
+      const row = settlementRows.find((entry) => entry.area === area);
+      return {
+        pending: Number(row?.pending ?? '0'),
+        submitted: Number(row?.submitted ?? '0'),
+        confirmed: Number(row?.confirmed ?? '0'),
+        failed: Number(row?.failed ?? '0'),
+      };
+    };
+    const platformFeeTransfers = toSettlementCount('platform_fee_transfer');
+    const profitDeposits = toSettlementCount('profit_deposit');
+    const anomalies = anomalyRows[0] ?? {
+      feeTransferStaleSubmitted: '0',
+      profitDepositStaleSubmitted: '0',
+      orphanedFeeTransfers: '0',
+      settlementFailures24h: '0',
+    };
     const totals = {
       pending: propertyIntents.pending + profitIntents.pending + platformFeeIntents.pending,
       submitted: propertyIntents.submitted + profitIntents.submitted + platformFeeIntents.submitted,
@@ -122,6 +218,16 @@ export const getAdminMetrics = async (_req: AuthenticatedRequest, res: Response)
         profit: profitIntents,
         platformFee: platformFeeIntents,
         totals,
+      },
+      settlements: {
+        platformFeeTransfers,
+        profitDeposits,
+        anomalies: {
+          feeTransferStaleSubmitted: Number(anomalies.feeTransferStaleSubmitted ?? '0'),
+          profitDepositStaleSubmitted: Number(anomalies.profitDepositStaleSubmitted ?? '0'),
+          orphanedFeeTransfers: Number(anomalies.orphanedFeeTransfers ?? '0'),
+          settlementFailures24h: Number(anomalies.settlementFailures24h ?? '0'),
+        },
       },
       api: metrics,
     });

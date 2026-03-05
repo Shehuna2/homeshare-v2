@@ -109,6 +109,7 @@ const retryIntent = async (table, id) => {
         error_message = NULL,
         submitted_at = NULL,
         confirmed_at = NULL,
+        attempt_count = 0,
         updated_at = NOW()
     WHERE id = :id
       AND status = 'failed'

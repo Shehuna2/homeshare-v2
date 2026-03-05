@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { useAccount } from 'wagmi';
+import { getAddress } from 'ethers';
 import { RootState } from '../store';
 import { setUser, clearUser } from '../store/slices/userSlice';
 import {
@@ -72,6 +73,11 @@ type CombinedSubmissionRecord = {
   includePlatformFeeIntent: boolean;
   profitIntentId: string | null;
   platformFeeIntentId: string | null;
+  grossSettlementUsdc?: string;
+  platformFeeUsdc?: string;
+  netDistributionUsdc?: string;
+  platformFeeRecipient?: string | null;
+  profitDistributorAddress?: string | null;
 };
 
 type CombinedSubmissionProgress = {
@@ -86,6 +92,24 @@ type CombinedSubmissionProgress = {
 };
 
 type CombinedRowOutcome = 'completed' | 'in_progress' | 'needs_attention';
+const PROFIT_INTENT_MAX_ATTEMPTS = 3;
+
+const getProfitIntentBlockerMessage = (
+  intent: ProfitDistributionIntentResponse | null | undefined
+): string | null => {
+  if (!intent) return null;
+  const error = (intent.errorMessage || '').toLowerCase();
+  if (error.includes('insufficient operator usdc balance')) {
+    return 'Blocked: operator USDC is insufficient for investor deposit.';
+  }
+  if (intent.status === 'pending' && intent.attemptCount >= PROFIT_INTENT_MAX_ATTEMPTS) {
+    return 'Blocked: max processing attempts reached. Reset/Retry this profit intent.';
+  }
+  if (intent.status === 'failed' && intent.errorMessage) {
+    return `Blocked: ${intent.errorMessage}`;
+  }
+  return null;
+};
 
 const loadCombinedHistory = (): CombinedSubmissionRecord[] => {
   try {
@@ -227,12 +251,19 @@ export default function OwnerConsole() {
   const [showCreateProfitModal, setShowCreateProfitModal] = useState(false);
   const [showPlatformFeeModal, setShowPlatformFeeModal] = useState(false);
   const [showCombinedIntentModal, setShowCombinedIntentModal] = useState(false);
+  const [showSmartWithdrawModal, setShowSmartWithdrawModal] = useState(false);
+  const [smartWithdrawCampaign, setSmartWithdrawCampaign] = useState<CampaignResponse | null>(null);
+  const [smartWithdrawPreflight, setSmartWithdrawPreflight] =
+    useState<CampaignLifecyclePreflightResponse | null>(null);
+  const [smartWithdrawRecipient, setSmartWithdrawRecipient] = useState('');
+  const [smartWithdrawStepMessage, setSmartWithdrawStepMessage] = useState('');
+  const [isSmartWithdrawRunning, setIsSmartWithdrawRunning] = useState(false);
   const [showEditPropertyModal, setShowEditPropertyModal] = useState(false);
-  const [showAllCampaignOverview, setShowAllCampaignOverview] = useState(false);
-  const [showAllCombinedSubmissions, setShowAllCombinedSubmissions] = useState(false);
-  const [showAllPropertyIntents, setShowAllPropertyIntents] = useState(false);
-  const [showAllProfitIntents, setShowAllProfitIntents] = useState(false);
-  const [showAllPlatformFeeIntents, setShowAllPlatformFeeIntents] = useState(false);
+  const [showAllCampaignOverview] = useState(false);
+  const [showAllCombinedSubmissions] = useState(false);
+  const [showAllPropertyIntents] = useState(false);
+  const [showAllProfitIntents] = useState(false);
+  const [showAllPlatformFeeIntents] = useState(false);
   const [propertyForm, setPropertyForm] = useState({
     propertyId: '',
     name: '',
@@ -256,10 +287,10 @@ export default function OwnerConsole() {
   const [propertyImageFile, setPropertyImageFile] = useState<File | null>(null);
   const [isUploadingPropertyImage, setIsUploadingPropertyImage] = useState(false);
   const [propertyImageUploadProgress, setPropertyImageUploadProgress] = useState(0);
-  const [propertyImageUploadState, setPropertyImageUploadState] = useState<
+  const [, setPropertyImageUploadState] = useState<
     'idle' | 'uploading' | 'success' | 'error'
   >('idle');
-  const [propertyImageUploadDebug, setPropertyImageUploadDebug] = useState('');
+  const [, setPropertyImageUploadDebug] = useState('');
   const [platformFeeForm, setPlatformFeeForm] = useState({
     campaignAddress: '',
     platformFeeBps: '',
@@ -287,11 +318,11 @@ export default function OwnerConsole() {
   const [adminProperties, setAdminProperties] = useState<AdminPropertyResponse[]>([]);
   const [propertyCatalogLoading, setPropertyCatalogLoading] = useState(false);
   const [propertyActionLoadingId, setPropertyActionLoadingId] = useState<string | null>(null);
-  const [bulkPropertyActionLoading, setBulkPropertyActionLoading] = useState<
+  const [, setBulkPropertyActionLoading] = useState<
     'archive' | 'restore' | null
   >(null);
   const [propertyCatalogQuery, setPropertyCatalogQuery] = useState('');
-  const [propertyCatalogStatusFilter, setPropertyCatalogStatusFilter] = useState<
+  const [propertyCatalogStatusFilter] = useState<
     'all' | 'active' | 'archived'
   >('all');
   const [selectedPropertyIds, setSelectedPropertyIds] = useState<string[]>([]);
@@ -330,19 +361,19 @@ export default function OwnerConsole() {
   const [profitIntents, setProfitIntents] = useState<ProfitDistributionIntentResponse[]>([]);
   const [platformFeeIntents, setPlatformFeeIntents] = useState<PlatformFeeIntentResponse[]>([]);
   const [campaignsLoading, setCampaignsLoading] = useState(true);
-  const [intentsLoading, setIntentsLoading] = useState(false);
+  const [, setIntentsLoading] = useState(false);
   const [intentActionLoadingKey, setIntentActionLoadingKey] = useState<string | null>(null);
-  const [bulkRetryLoadingScope, setBulkRetryLoadingScope] = useState<string | null>(null);
-  const [bulkResetLoadingScope, setBulkResetLoadingScope] = useState<string | null>(null);
+  const [, setBulkRetryLoadingScope] = useState<string | null>(null);
+  const [, setBulkResetLoadingScope] = useState<string | null>(null);
   const [adminMetrics, setAdminMetrics] = useState<AdminMetricsResponse | null>(null);
   const [profitPreflight, setProfitPreflight] = useState<ProfitPreflightResponse | null>(null);
-  const [profitFlowStatus, setProfitFlowStatus] = useState<ProfitFlowStatusResponse | null>(null);
-  const [profitChecksLoading, setProfitChecksLoading] = useState(false);
+  const [, setProfitFlowStatus] = useState<ProfitFlowStatusResponse | null>(null);
+  const [, setProfitChecksLoading] = useState(false);
   const [isApprovingProfitAllowance, setIsApprovingProfitAllowance] = useState(false);
   const [platformFeePreflight, setPlatformFeePreflight] = useState<PlatformFeePreflightResponse | null>(null);
-  const [platformFeeFlowStatus, setPlatformFeeFlowStatus] = useState<PlatformFeeFlowStatusResponse | null>(null);
-  const [platformFeeChecksLoading, setPlatformFeeChecksLoading] = useState(false);
-  const [campaignLifecyclePreflightByAddress, setCampaignLifecyclePreflightByAddress] = useState<
+  const [, setPlatformFeeFlowStatus] = useState<PlatformFeeFlowStatusResponse | null>(null);
+  const [, setPlatformFeeChecksLoading] = useState(false);
+  const [, setCampaignLifecyclePreflightByAddress] = useState<
     Record<string, CampaignLifecyclePreflightResponse>
   >({});
   const [campaignLifecycleLoadingKey, setCampaignLifecycleLoadingKey] = useState<string | null>(null);
@@ -356,8 +387,9 @@ export default function OwnerConsole() {
   const [combinedToasts, setCombinedToasts] = useState<
     Array<{ id: string; text: string; tone: 'success' | 'warning' }>
   >([]);
-  const [showProfitAdvanced, setShowProfitAdvanced] = useState(() => loadToggle(PROFIT_ADVANCED_KEY));
-  const [showPlatformAdvanced, setShowPlatformAdvanced] = useState(() =>
+  const [isSubmittingSettlement, setIsSubmittingSettlement] = useState(false);
+  const [showProfitAdvanced] = useState(() => loadToggle(PROFIT_ADVANCED_KEY));
+  const [showPlatformAdvanced] = useState(() =>
     loadToggle(PLATFORM_ADVANCED_KEY)
   );
   const [isAutoAuthenticating, setIsAutoAuthenticating] = useState(false);
@@ -396,6 +428,10 @@ export default function OwnerConsole() {
     (normalizedPlatformFeeBps === 0 || !!effectivePlatformFeeRecipient);
   const selectedCombinedCampaign =
     campaigns.find((campaign) => campaign.campaignAddress === combinedForm.campaignAddress) ?? null;
+  const selectedPlatformFeeCampaign =
+    campaigns.find((campaign) => campaign.campaignAddress === platformFeeForm.campaignAddress) ?? null;
+  const selectedProfitCampaign =
+    campaigns.find((campaign) => campaign.propertyId === profitForm.propertyId) ?? null;
   const selectedCombinedProperty =
     properties.find((property) => property.propertyId === (selectedCombinedCampaign?.propertyId ?? '')) ?? null;
   const effectiveCombinedDistributor =
@@ -419,8 +455,16 @@ export default function OwnerConsole() {
     0,
     normalizedCombinedGrossSettlementUsdc - computedCombinedFeeUsdc
   );
-  const basescanTxUrl = (txHash: string) => `https://sepolia.basescan.org/tx/${txHash}`;
   const previousCombinedOutcomeRef = useRef<Record<string, CombinedRowOutcome>>({});
+  const platformFeeUiBlockedByCampaignState =
+    !!selectedPlatformFeeCampaign &&
+    (selectedPlatformFeeCampaign.state === 'ACTIVE' || selectedPlatformFeeCampaign.state === 'FAILED');
+  const combinedUiBlockedByCampaignState =
+    !!selectedCombinedCampaign &&
+    (selectedCombinedCampaign.state === 'ACTIVE' || selectedCombinedCampaign.state === 'FAILED');
+  const profitUiBlockedByCampaignState =
+    !!selectedProfitCampaign &&
+    (selectedProfitCampaign.state === 'ACTIVE' || selectedProfitCampaign.state === 'FAILED');
   const profitIntentById = useMemo(() => {
     const map = new Map<string, ProfitDistributionIntentResponse>();
     for (const intent of profitIntents) {
@@ -435,42 +479,6 @@ export default function OwnerConsole() {
     }
     return map;
   }, [platformFeeIntents]);
-  const latestPlatformFeeIntentByCampaign = useMemo(() => {
-    const map = new Map<string, PlatformFeeIntentResponse>();
-    for (const intent of platformFeeIntents) {
-      const key = intent.campaignAddress.toLowerCase();
-      const existing = map.get(key);
-      if (!existing) {
-        map.set(key, intent);
-        continue;
-      }
-      const existingTs = new Date(existing.createdAt).getTime();
-      const nextTs = new Date(intent.createdAt).getTime();
-      if (nextTs > existingTs) {
-        map.set(key, intent);
-      }
-    }
-    return map;
-  }, [platformFeeIntents]);
-  const selectedPlatformPreview = useMemo(() => {
-    if (!selectedPlatformCampaign) {
-      return null;
-    }
-    const fallbackIntent = latestPlatformFeeIntentByCampaign.get(
-      selectedPlatformCampaign.campaignAddress.toLowerCase()
-    );
-    const resolvedFeeBps = selectedPlatformCampaign.platformFeeBps ?? fallbackIntent?.platformFeeBps ?? null;
-    const resolvedRecipient =
-      selectedPlatformCampaign.platformFeeRecipient ?? fallbackIntent?.platformFeeRecipient ?? null;
-    return {
-      platformFeeBps: resolvedFeeBps,
-      platformFeeRecipient: resolvedRecipient,
-      fromIntent:
-        selectedPlatformCampaign.platformFeeBps === null &&
-        selectedPlatformCampaign.platformFeeRecipient === null &&
-        !!fallbackIntent,
-    };
-  }, [selectedPlatformCampaign, latestPlatformFeeIntentByCampaign]);
   const recentCampaigns = useMemo(() => {
     return [...campaigns].sort(
       (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
@@ -508,7 +516,6 @@ export default function OwnerConsole() {
   const allFilteredSelected =
     filteredAdminPropertyIds.length > 0 &&
     filteredAdminPropertyIds.every((id) => selectedPropertyIds.includes(id));
-  const hasSelection = selectedPropertyIds.length > 0;
   const ownerHealthAlerts = useMemo(() => {
     if (!adminMetrics) {
       return [];
@@ -541,6 +548,33 @@ export default function OwnerConsole() {
         tone: 'warning',
         text: `${totals.failed} failed intent(s) need operator attention.`,
       });
+    }
+    const settlementAnomalies = adminMetrics.settlements?.anomalies;
+    if (settlementAnomalies) {
+      if (settlementAnomalies.feeTransferStaleSubmitted > 0) {
+        alerts.push({
+          tone: 'warning',
+          text: `${settlementAnomalies.feeTransferStaleSubmitted} stale platform-fee transfer intent(s) older than 5 minutes.`,
+        });
+      }
+      if (settlementAnomalies.profitDepositStaleSubmitted > 0) {
+        alerts.push({
+          tone: 'warning',
+          text: `${settlementAnomalies.profitDepositStaleSubmitted} stale profit-deposit intent(s) older than 5 minutes.`,
+        });
+      }
+      if (settlementAnomalies.orphanedFeeTransfers > 0) {
+        alerts.push({
+          tone: 'danger',
+          text: `${settlementAnomalies.orphanedFeeTransfers} platform-fee transfer intent(s) reference unknown campaigns.`,
+        });
+      }
+      if (settlementAnomalies.settlementFailures24h > 0) {
+        alerts.push({
+          tone: 'warning',
+          text: `${settlementAnomalies.settlementFailures24h} settlement-related intent failure(s) in last 24h.`,
+        });
+      }
     }
 
     return alerts;
@@ -867,6 +901,7 @@ export default function OwnerConsole() {
       if (platformFeePreflight && !platformFeePreflight.checks.recipientValid) {
         throw new Error('Platform fee intent blocked: invalid fee recipient.');
       }
+      await ensureSettlementIntentEligibility(payload.campaignAddress, 'Platform fee intent');
 
       await createPlatformFeeIntent(payload, token as string);
 
@@ -927,8 +962,12 @@ export default function OwnerConsole() {
   };
 
   const handleCreateCombinedIntentBatch = async () => {
+    if (isSubmittingSettlement) {
+      return;
+    }
     setErrorMessage('');
     setStatusMessage('Submitting settlement intents...');
+    setIsSubmittingSettlement(true);
     try {
       if (!token) {
         throw new Error('You must be logged in as an admin to submit intents.');
@@ -949,6 +988,11 @@ export default function OwnerConsole() {
       if (bps > 0 && !effectiveCombinedRecipient) {
         throw new Error('Platform fee recipient is required when fee is greater than 0.');
       }
+      const checksumCampaignAddress = getAddress(combinedForm.campaignAddress.trim());
+      const checksumDistributorAddress = getAddress(effectiveCombinedDistributor);
+      const checksumRecipientAddress =
+        bps === 0 ? null : getAddress(effectiveCombinedRecipient);
+      await ensureSettlementIntentEligibility(checksumCampaignAddress, 'Settlement');
 
       const grossSettlementUsdc = Number(combinedForm.grossSettlementUsdc);
       if (!Number.isFinite(grossSettlementUsdc) || grossSettlementUsdc <= 0) {
@@ -960,18 +1004,36 @@ export default function OwnerConsole() {
       if (!Number.isFinite(netDistributionUsdc) || netDistributionUsdc <= 0) {
         throw new Error('Net investor distribution must be greater than 0 after platform fee.');
       }
-      const recipientPreview = bps === 0 ? 'N/A (fee disabled)' : effectiveCombinedRecipient;
+      const duplicateSettlement = combinedHistory.find((entry) => {
+        if (!entry.grossSettlementUsdc || !entry.platformFeeUsdc || !entry.netDistributionUsdc) {
+          return false;
+        }
+        const createdMs = new Date(entry.createdAt).getTime();
+        const recentEnough = Number.isFinite(createdMs) && Date.now() - createdMs < 5 * 60 * 1000;
+        return (
+          recentEnough &&
+          entry.campaignAddress.toLowerCase() === checksumCampaignAddress.toLowerCase() &&
+          entry.grossSettlementUsdc === grossSettlementUsdc.toFixed(6) &&
+          entry.platformFeeUsdc === feeUsdc.toFixed(6) &&
+          entry.netDistributionUsdc === netDistributionUsdc.toFixed(6)
+        );
+      });
+      if (duplicateSettlement) {
+        throw new Error(
+          'Similar settlement was just submitted recently. Refresh statuses before submitting again.'
+        );
+      }
       const confirmation = window.confirm(
         [
           'Confirm settlement submission',
           '',
-          `Campaign: ${combinedForm.campaignAddress.trim()}`,
+          `Campaign: ${checksumCampaignAddress}`,
           `Property: ${selectedCombinedCampaign.propertyId}`,
           `Gross settlement: ${grossSettlementUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`,
           `Platform fee (${bps} bps): ${feeUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`,
           `Net investor distribution: ${netDistributionUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`,
-          `Fee recipient: ${recipientPreview}`,
-          `Profit distributor: ${effectiveCombinedDistributor}`,
+          `Fee recipient: ${bps === 0 ? 'N/A (fee disabled)' : checksumRecipientAddress}`,
+          `Profit distributor: ${checksumDistributorAddress}`,
           '',
           'Proceed?',
         ].join('\n')
@@ -986,11 +1048,11 @@ export default function OwnerConsole() {
         includeProfitIntent: true,
         includePlatformFeeIntent: true,
         propertyId: selectedCombinedCampaign.propertyId,
-        profitDistributorAddress: effectiveCombinedDistributor,
+        profitDistributorAddress: checksumDistributorAddress.toLowerCase(),
         usdcAmountBaseUnits: Math.round(netDistributionUsdc * 1_000_000).toString(),
-        campaignAddress: combinedForm.campaignAddress.trim(),
+        campaignAddress: checksumCampaignAddress.toLowerCase(),
         platformFeeBps: bps,
-        platformFeeRecipient: bps === 0 ? null : effectiveCombinedRecipient,
+        platformFeeRecipient: bps === 0 ? null : checksumRecipientAddress?.toLowerCase(),
         platformFeeUsdcAmountBaseUnits: Math.round(feeUsdc * 1_000_000).toString(),
       };
 
@@ -1009,12 +1071,17 @@ export default function OwnerConsole() {
           response.platformFeeIntent?.id ||
           `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         createdAt: new Date().toISOString(),
-        campaignAddress: combinedForm.campaignAddress.trim(),
+        campaignAddress: checksumCampaignAddress.toLowerCase(),
         propertyId: selectedCombinedCampaign.propertyId,
         includeProfitIntent: true,
         includePlatformFeeIntent: true,
         profitIntentId: response.profitIntent?.id ?? null,
         platformFeeIntentId: response.platformFeeIntent?.id ?? null,
+        grossSettlementUsdc: grossSettlementUsdc.toFixed(6),
+        platformFeeUsdc: feeUsdc.toFixed(6),
+        netDistributionUsdc: netDistributionUsdc.toFixed(6),
+        platformFeeRecipient: checksumRecipientAddress?.toLowerCase() ?? null,
+        profitDistributorAddress: checksumDistributorAddress.toLowerCase(),
       };
       persistCombinedHistory([historyRecord, ...combinedHistory].slice(0, 10));
 
@@ -1033,7 +1100,85 @@ export default function OwnerConsole() {
     } catch (error) {
       setErrorMessage((error as Error).message);
       setStatusMessage('');
+    } finally {
+      setIsSubmittingSettlement(false);
     }
+  };
+
+  const handleRetryCombinedSubmission = async (record: CombinedSubmissionRecord) => {
+    if (!token || !canManageOwnerFlows) return;
+    setErrorMessage('');
+    setStatusMessage(`Retrying failed intents for ${record.propertyId}...`);
+    try {
+      if (record.profitIntentId) {
+        const profitIntent = profitIntentById.get(record.profitIntentId);
+        if (profitIntent?.status === 'failed') {
+          await retryAdminIntent(token, 'profit', record.profitIntentId);
+        }
+      }
+      if (record.platformFeeIntentId) {
+        const platformIntent = platformFeeIntentById.get(record.platformFeeIntentId);
+        if (platformIntent?.status === 'failed') {
+          await retryAdminIntent(token, 'platformFee', record.platformFeeIntentId);
+        }
+      }
+      setStatusMessage(`Retry queued for ${record.propertyId}.`);
+      await handleRefreshCombinedStatuses();
+    } catch (error) {
+      setErrorMessage((error as Error).message);
+      setStatusMessage('');
+    }
+  };
+
+  const handleExportSettlementCsv = () => {
+    if (combinedHistory.length === 0) return;
+    const header = [
+      'createdAt',
+      'propertyId',
+      'campaignAddress',
+      'grossSettlementUsdc',
+      'platformFeeUsdc',
+      'netDistributionUsdc',
+      'platformFeeRecipient',
+      'profitDistributorAddress',
+      'profitIntentId',
+      'platformFeeIntentId',
+      'profitIntentStatus',
+      'platformFeeIntentStatus',
+    ];
+    const rows = combinedHistory.map((record) => {
+      const profitStatus = record.profitIntentId
+        ? (profitIntentById.get(record.profitIntentId)?.status ?? '')
+        : '';
+      const platformStatus = record.platformFeeIntentId
+        ? (platformFeeIntentById.get(record.platformFeeIntentId)?.status ?? '')
+        : '';
+      return [
+        record.createdAt,
+        record.propertyId,
+        record.campaignAddress,
+        record.grossSettlementUsdc ?? '',
+        record.platformFeeUsdc ?? '',
+        record.netDistributionUsdc ?? '',
+        record.platformFeeRecipient ?? '',
+        record.profitDistributorAddress ?? '',
+        record.profitIntentId ?? '',
+        record.platformFeeIntentId ?? '',
+        profitStatus,
+        platformStatus,
+      ];
+    });
+    const escape = (value: string) => `"${String(value).replace(/"/g, '""')}"`;
+    const csv = [header, ...rows].map((line) => line.map((value) => escape(value)).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `settlements-${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   };
 
   const handleCreateProfitIntent = async () => {
@@ -1041,6 +1186,8 @@ export default function OwnerConsole() {
     setStatusMessage('Submitting profit distribution intent...');
     try {
       const payload = buildProfitIntentPayload();
+      const linkedCampaign = resolveCampaignForProperty(payload.propertyId);
+      await ensureSettlementIntentEligibility(linkedCampaign.campaignAddress, 'Profit intent');
       if (!profitPreflight) {
         throw new Error('Profit preflight not loaded yet. Wait and retry.');
       }
@@ -1258,6 +1405,8 @@ export default function OwnerConsole() {
     setIsApprovingProfitAllowance(true);
     try {
       const payload = buildProfitIntentPayload();
+      const linkedCampaign = resolveCampaignForProperty(payload.propertyId);
+      await ensureSettlementIntentEligibility(linkedCampaign.campaignAddress, 'Profit intent');
       const approval = await approveProfitAllowance(
         {
           chainId: 84532,
@@ -1551,6 +1700,35 @@ export default function OwnerConsole() {
     return preflight;
   };
 
+  const resolveCampaignForProperty = (propertyId: string): CampaignResponse => {
+    const campaign = campaigns.find((entry) => entry.propertyId === propertyId) ?? null;
+    if (!campaign) {
+      throw new Error(
+        `No campaign found for property ${propertyId}. You can submit settlement intents only for deployed campaigns.`
+      );
+    }
+    return campaign;
+  };
+
+  const ensureSettlementIntentEligibility = async (
+    campaignAddress: string,
+    label: 'Profit intent' | 'Platform fee intent' | 'Settlement'
+  ) => {
+    const preflight = await loadCampaignLifecyclePreflight(campaignAddress);
+    const state = preflight.campaign.state;
+    const balance = BigInt(preflight.campaign.campaignUsdcBalanceBaseUnits);
+    if (state === 'ACTIVE') {
+      throw new Error(`${label} blocked: campaign is ACTIVE. Finalize campaign first.`);
+    }
+    if (state === 'FAILED') {
+      throw new Error(`${label} blocked: campaign FAILED and cannot be settled.`);
+    }
+    if (state === 'SUCCESS' && balance > 0n) {
+      throw new Error(`${label} blocked: withdraw campaign funds first.`);
+    }
+    return preflight;
+  };
+
   const handleFinalizeCampaign = async (campaignAddress: string) => {
     if (!token) {
       setErrorMessage('You must be logged in as an admin to manage campaigns.');
@@ -1606,50 +1784,94 @@ export default function OwnerConsole() {
     }
   };
 
-  const handleWithdrawCampaignFunds = async (campaignAddress: string) => {
-    if (!token) {
+  const openSmartWithdrawModal = async (campaign: CampaignResponse) => {
+    const defaultRecipient = connectedWalletAddress || address || '';
+    setSmartWithdrawCampaign(campaign);
+    setSmartWithdrawRecipient(defaultRecipient);
+    setSmartWithdrawPreflight(null);
+    setSmartWithdrawStepMessage('Loading campaign checks...');
+    setShowSmartWithdrawModal(true);
+    try {
+      const preflight = await loadCampaignLifecyclePreflight(campaign.campaignAddress);
+      setSmartWithdrawPreflight(preflight);
+      setSmartWithdrawStepMessage(
+        preflight.actions.withdraw.ready
+          ? 'Campaign is ready for withdraw.'
+          : preflight.actions.finalize.ready
+            ? 'Campaign must be finalized first. Auto-finalize is available.'
+            : 'Withdraw is currently blocked by campaign checks.'
+      );
+    } catch (error) {
+      setSmartWithdrawStepMessage((error as Error).message);
+    }
+  };
+
+  const handleSmartWithdrawConfirm = async () => {
+    if (!token || !smartWithdrawCampaign) {
       setErrorMessage('You must be logged in as an admin to manage campaigns.');
       return;
     }
-
-    const actionKey = `withdraw:${campaignAddress.toLowerCase()}`;
-    setCampaignLifecycleLoadingKey(actionKey);
-    setErrorMessage('');
-    setStatusMessage('Checking withdraw readiness...');
+    let recipient: string;
     try {
-      const preflight = await loadCampaignLifecyclePreflight(campaignAddress);
+      recipient = getAddress(smartWithdrawRecipient.trim());
+    } catch {
+      setErrorMessage('Recipient address is invalid.');
+      return;
+    }
+
+    setErrorMessage('');
+    setIsSmartWithdrawRunning(true);
+    try {
+      setSmartWithdrawStepMessage('Checking campaign lifecycle...');
+      let preflight = await loadCampaignLifecyclePreflight(smartWithdrawCampaign.campaignAddress);
+      setSmartWithdrawPreflight(preflight);
+
+      if (!preflight.actions.withdraw.ready) {
+        if (preflight.actions.finalize.ready) {
+          setSmartWithdrawStepMessage('Finalizing campaign before withdraw...');
+          const finalizeResult = await finalizeCampaignAdmin(token, {
+            campaignAddress: smartWithdrawCampaign.campaignAddress,
+            chainId: 84532,
+          });
+          setSmartWithdrawStepMessage(`Finalize submitted: ${finalizeResult.txHash}`);
+          await Promise.all([loadCampaigns(), loadIntents(token)]);
+          preflight = await loadCampaignLifecyclePreflight(smartWithdrawCampaign.campaignAddress);
+          setSmartWithdrawPreflight(preflight);
+        } else {
+          throw new Error(
+            `Withdraw blocked: ${preflight.actions.withdraw.reasons
+              .map(prettyLifecycleReason)
+              .join('; ')}`
+          );
+        }
+      }
+
       if (!preflight.actions.withdraw.ready) {
         throw new Error(
-          `Withdraw blocked: ${preflight.actions.withdraw.reasons
+          `Withdraw still blocked after finalize check: ${preflight.actions.withdraw.reasons
             .map(prettyLifecycleReason)
             .join('; ')}`
         );
       }
 
-      const recipientDefault =
-        connectedWalletAddress || address || preflight.operatorAddress || preflight.contractOwner;
-      const recipient = window
-        .prompt('Recipient address for withdrawFunds', recipientDefault ?? '')
-        ?.trim();
-      if (!recipient) {
-        setStatusMessage('Withdraw cancelled.');
-        return;
-      }
-
-      setStatusMessage('Submitting withdraw transaction...');
-      const result = await withdrawCampaignFundsAdmin(token, {
-        campaignAddress,
+      setSmartWithdrawStepMessage('Submitting withdraw transaction...');
+      const withdrawResult = await withdrawCampaignFundsAdmin(token, {
+        campaignAddress: smartWithdrawCampaign.campaignAddress,
         recipient,
         chainId: 84532,
       });
-      setStatusMessage(`Withdraw submitted: ${result.txHash}`);
+      setStatusMessage(`Withdraw submitted: ${withdrawResult.txHash}`);
       await Promise.all([loadCampaigns(), loadIntents(token)]);
-      await loadCampaignLifecyclePreflight(campaignAddress);
+      await loadCampaignLifecyclePreflight(smartWithdrawCampaign.campaignAddress);
+      setShowSmartWithdrawModal(false);
+      setSmartWithdrawCampaign(null);
+      setSmartWithdrawPreflight(null);
+      setSmartWithdrawStepMessage('');
     } catch (error) {
       setErrorMessage((error as Error).message);
       setStatusMessage('');
     } finally {
-      setCampaignLifecycleLoadingKey(null);
+      setIsSmartWithdrawRunning(false);
     }
   };
 
@@ -2079,6 +2301,17 @@ export default function OwnerConsole() {
       // Ignore localStorage failures.
     }
   }, [showPlatformAdvanced]);
+
+  // Retained helper flows (operator runbooks / manual recovery helpers).
+  void handleCreateProfitIntent;
+  void clearCombinedHistory;
+  void togglePropertySelection;
+  void toggleSelectAllFilteredProperties;
+  void handleBulkArchiveSelectedProperties;
+  void handleBulkRestoreSelectedProperties;
+  void handleQuickProfitIntent;
+  void handleRetryFailedIntents;
+  void handleResetFailedIntents;
 
   return (
     <div className="relative min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
@@ -2541,7 +2774,8 @@ export default function OwnerConsole() {
                       !canManageOwnerFlows ||
                       isApprovingProfitAllowance ||
                       !profitForm.propertyId ||
-                      !profitForm.usdcAmount
+                      !profitForm.usdcAmount ||
+                      profitUiBlockedByCampaignState
                     }
                   >
                     {isApprovingProfitAllowance ? 'Approving...' : 'Approve USDC Allowance'}
@@ -2553,12 +2787,18 @@ export default function OwnerConsole() {
                       !canManageOwnerFlows ||
                       isApprovingProfitAllowance ||
                       !profitPreflight ||
-                      !profitPreflight.checks.operatorConfigured
+                      !profitPreflight.checks.operatorConfigured ||
+                      profitUiBlockedByCampaignState
                     }
                   >
                     {isApprovingProfitAllowance ? 'Processing...' : 'Approve + Submit Intent'}
                   </button>
                 </div>
+                {profitUiBlockedByCampaignState && (
+                  <p className="mt-3 text-xs text-amber-300">
+                    Profit intent is blocked until campaign is finalized and withdrawn.
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -2606,11 +2846,18 @@ export default function OwnerConsole() {
                   <button
                     className="rounded-lg bg-gradient-to-r from-emerald-600 to-emerald-500 px-6 py-2 text-white font-medium hover:shadow-lg hover:shadow-emerald-500/30 disabled:opacity-60 transition-all"
                     onClick={handleCreatePlatformFeeIntent}
-                    disabled={!canManageOwnerFlows || !hasPlatformFeeBasicsValid}
+                    disabled={
+                      !canManageOwnerFlows || !hasPlatformFeeBasicsValid || platformFeeUiBlockedByCampaignState
+                    }
                   >
                     Submit Platform Fee Intent
                   </button>
                 </div>
+                {platformFeeUiBlockedByCampaignState && (
+                  <p className="mt-3 text-xs text-amber-300">
+                    Platform fee intent is blocked until campaign is finalized and withdrawn.
+                  </p>
+                )}
               </div>
             </div>
           )}
@@ -2692,9 +2939,120 @@ export default function OwnerConsole() {
                   <button
                     className="rounded-lg bg-gradient-to-r from-emerald-600 to-emerald-500 px-6 py-2 text-white font-medium hover:shadow-lg hover:shadow-emerald-500/30 disabled:opacity-60 transition-all"
                     onClick={handleCreateCombinedIntentBatch}
-                    disabled={!canManageOwnerFlows || !combinedForm.campaignAddress}
+                    disabled={
+                      !canManageOwnerFlows ||
+                      !combinedForm.campaignAddress ||
+                      isSubmittingSettlement ||
+                      combinedUiBlockedByCampaignState
+                    }
                   >
-                    Submit Settlement Intents
+                    {isSubmittingSettlement ? 'Submitting...' : 'Submit Settlement Intents'}
+                  </button>
+                </div>
+                {combinedUiBlockedByCampaignState && (
+                  <p className="mt-3 text-xs text-amber-300">
+                    Settlement intents are blocked until campaign is finalized and withdrawn.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {showSmartWithdrawModal && smartWithdrawCampaign && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
+              <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-white/15 bg-slate-900/95 p-6 shadow-2xl shadow-black/50 backdrop-blur">
+                <div className="mb-4 flex items-start justify-between gap-4">
+                  <div>
+                    <h3 className="text-xl font-semibold text-white">Smart Withdraw Flow</h3>
+                    <p className="mt-1 text-sm text-slate-400">
+                      {smartWithdrawCampaign.propertyId} · {smartWithdrawCampaign.campaignAddress}
+                    </p>
+                  </div>
+                  <button
+                    className="rounded border border-slate-600 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800/60 transition-all"
+                    onClick={() => {
+                      if (isSmartWithdrawRunning) return;
+                      setShowSmartWithdrawModal(false);
+                      setSmartWithdrawCampaign(null);
+                      setSmartWithdrawPreflight(null);
+                      setSmartWithdrawStepMessage('');
+                    }}
+                    disabled={isSmartWithdrawRunning}
+                  >
+                    Close
+                  </button>
+                </div>
+
+                <div className="space-y-3 rounded-lg border border-white/10 bg-slate-950/40 p-4 text-sm">
+                  <p className="text-slate-200">
+                    This action will:
+                    {' '}
+                    <span className="font-medium">1) check readiness</span>,
+                    {' '}
+                    <span className="font-medium">2) finalize if required</span>,
+                    {' '}
+                    <span className="font-medium">3) withdraw funds</span>.
+                  </p>
+                  <div className="rounded border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-xs text-blue-200">
+                    {smartWithdrawStepMessage || 'Waiting...'}
+                  </div>
+                  {smartWithdrawPreflight && (
+                    <div className="grid gap-2 text-xs text-slate-300 md:grid-cols-2">
+                      <div className="rounded border border-white/10 bg-slate-900/40 p-2">
+                        <div className="font-medium text-slate-200">Finalize Ready</div>
+                        <div className={smartWithdrawPreflight.actions.finalize.ready ? 'text-emerald-300' : 'text-amber-300'}>
+                          {smartWithdrawPreflight.actions.finalize.ready ? 'Yes' : 'No'}
+                        </div>
+                      </div>
+                      <div className="rounded border border-white/10 bg-slate-900/40 p-2">
+                        <div className="font-medium text-slate-200">Withdraw Ready</div>
+                        <div className={smartWithdrawPreflight.actions.withdraw.ready ? 'text-emerald-300' : 'text-amber-300'}>
+                          {smartWithdrawPreflight.actions.withdraw.ready ? 'Yes' : 'No'}
+                        </div>
+                      </div>
+                      {!smartWithdrawPreflight.actions.withdraw.ready &&
+                        smartWithdrawPreflight.actions.withdraw.reasons.length > 0 && (
+                          <div className="md:col-span-2 rounded border border-amber-500/30 bg-amber-500/10 p-2 text-amber-200">
+                            {smartWithdrawPreflight.actions.withdraw.reasons.map(prettyLifecycleReason).join('; ')}
+                          </div>
+                        )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="mt-4">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                    Recipient Address
+                  </label>
+                  <input
+                    type="text"
+                    value={smartWithdrawRecipient}
+                    onChange={(event) => setSmartWithdrawRecipient(event.target.value)}
+                    className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-900/60 px-3 py-2 text-sm text-white focus:border-emerald-500/50 focus:outline-none"
+                    disabled={isSmartWithdrawRunning}
+                  />
+                </div>
+
+                <div className="mt-5 flex items-center justify-end gap-2">
+                  <button
+                    className="rounded border border-slate-600 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/60 transition-all disabled:opacity-60"
+                    onClick={() => {
+                      if (isSmartWithdrawRunning) return;
+                      setShowSmartWithdrawModal(false);
+                      setSmartWithdrawCampaign(null);
+                      setSmartWithdrawPreflight(null);
+                      setSmartWithdrawStepMessage('');
+                    }}
+                    disabled={isSmartWithdrawRunning}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="rounded border border-emerald-500/60 bg-emerald-500/15 px-3 py-2 text-sm font-medium text-emerald-200 hover:bg-emerald-500/25 transition-all disabled:opacity-60"
+                    onClick={() => void handleSmartWithdrawConfirm()}
+                    disabled={!canManageOwnerFlows || isSmartWithdrawRunning}
+                  >
+                    {isSmartWithdrawRunning ? 'Running...' : 'Run Finalize + Withdraw'}
                   </button>
                 </div>
               </div>
@@ -2829,9 +3187,6 @@ export default function OwnerConsole() {
                         </thead>
                         <tbody className="divide-y divide-white/5">
                           {visibleCampaigns.map((campaign) => {
-                            const propertyMeta = properties.find(
-                              (property) => property.propertyId === campaign.propertyId
-                            );
                             const raisedUsdc = Number(campaign.raisedUsdcBaseUnits) / 1_000_000;
                             const targetUsdc = Number(campaign.targetUsdcBaseUnits) / 1_000_000;
                             const campaignKey = campaign.campaignAddress.toLowerCase();
@@ -2896,10 +3251,9 @@ export default function OwnerConsole() {
                                     </button>
                                     <button
                                       className="rounded border border-emerald-500/50 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-60 transition-all"
-                                      onClick={() => void handleWithdrawCampaignFunds(campaign.campaignAddress)}
+                                      onClick={() => void openSmartWithdrawModal(campaign)}
                                       disabled={
                                         !canManageOwnerFlows ||
-                                        campaign.state !== 'SUCCESS' ||
                                         isChecking ||
                                         isFinalizing ||
                                         isWithdrawing
@@ -2923,13 +3277,22 @@ export default function OwnerConsole() {
               <div className="mb-8 rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
                 <div className="mb-4 flex items-center justify-between">
                   <h2 className="text-2xl font-bold text-white">Recent Combined Submissions</h2>
-                  <button
-                    className="rounded-lg border border-slate-600 px-3 py-1 text-sm text-slate-200 hover:bg-slate-800/60 transition-all"
-                    onClick={() => void handleRefreshCombinedStatuses()}
-                    disabled={!canManageOwnerFlows || combinedProgressLoading}
-                  >
-                    {combinedProgressLoading ? 'Refreshing...' : 'Refresh Status'}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="rounded-lg border border-slate-600 px-3 py-1 text-sm text-slate-200 hover:bg-slate-800/60 transition-all"
+                      onClick={handleExportSettlementCsv}
+                      disabled={combinedHistory.length === 0}
+                    >
+                      Export CSV
+                    </button>
+                    <button
+                      className="rounded-lg border border-slate-600 px-3 py-1 text-sm text-slate-200 hover:bg-slate-800/60 transition-all"
+                      onClick={() => void handleRefreshCombinedStatuses()}
+                      disabled={!canManageOwnerFlows || combinedProgressLoading}
+                    >
+                      {combinedProgressLoading ? 'Refreshing...' : 'Refresh Status'}
+                    </button>
+                  </div>
                 </div>
                 {combinedHistory.length === 0 ? (
                   <p className="text-sm text-slate-400">No combined submissions yet.</p>
@@ -2942,7 +3305,15 @@ export default function OwnerConsole() {
                       const platformIntent = record.platformFeeIntentId
                         ? platformFeeIntentById.get(record.platformFeeIntentId)
                         : null;
+                      const progress = combinedProgress[record.id];
                       const outcome = getCombinedOutcome(record);
+                      const profitBlockerMessage = getProfitIntentBlockerMessage(profitIntent);
+                      const depositStepStatus =
+                        progress?.profitDepositIndexed === true
+                          ? 'confirmed'
+                          : profitBlockerMessage
+                            ? 'failed'
+                            : profitIntent?.status ?? 'pending';
 
                       return (
                         <div
@@ -2990,6 +3361,62 @@ export default function OwnerConsole() {
                               <span className={`${intentStatusClass(platformIntent.status)} px-2 py-0.5 rounded font-medium`}>
                                 {platformIntent.status}
                               </span>
+                            </div>
+                          )}
+                          {(record.grossSettlementUsdc || record.netDistributionUsdc) && (
+                            <div className="mt-2 text-xs text-slate-300">
+                              Gross {record.grossSettlementUsdc ?? '--'} USDC | Fee {record.platformFeeUsdc ?? '--'} USDC | Net {record.netDistributionUsdc ?? '--'} USDC
+                            </div>
+                          )}
+                          <div className="mt-2 rounded border border-white/10 bg-slate-900/35 p-2 text-xs text-slate-300">
+                            <div className="font-medium text-slate-200">Execution Order</div>
+                            <div className="mt-1 flex flex-wrap items-center gap-2">
+                              <span className="text-slate-400">1. setPlatformFee</span>
+                              <span
+                                className={`${intentStatusClass(
+                                  progress?.campaignMatchesTarget === true
+                                    ? 'confirmed'
+                                    : platformIntent?.status ?? 'pending'
+                                )} px-2 py-0.5 rounded font-medium`}
+                              >
+                                {progress?.campaignMatchesTarget === true
+                                  ? 'confirmed'
+                                  : platformIntent?.status ?? 'pending'}
+                              </span>
+                            </div>
+                            {(record.platformFeeUsdc && Number(record.platformFeeUsdc) > 0) && (
+                              <div className="mt-1 flex flex-wrap items-center gap-2">
+                                <span className="text-slate-400">2. transferPlatformFee</span>
+                                <span className={`${intentStatusClass(platformIntent?.status ?? 'pending')} px-2 py-0.5 rounded font-medium`}>
+                                  {platformIntent?.status ?? 'pending'}
+                                </span>
+                              </div>
+                            )}
+                            <div className="mt-1 flex flex-wrap items-center gap-2">
+                              <span className="text-slate-400">3. depositInvestorProfit</span>
+                              <span
+                                className={`${intentStatusClass(
+                                  depositStepStatus
+                                )} px-2 py-0.5 rounded font-medium`}
+                              >
+                                {depositStepStatus}
+                              </span>
+                            </div>
+                            {profitBlockerMessage && (
+                              <div className="mt-2 rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-[11px] text-red-200">
+                                {profitBlockerMessage}
+                              </div>
+                            )}
+                          </div>
+                          {(profitIntent?.status === 'failed' || platformIntent?.status === 'failed') && (
+                            <div className="mt-2">
+                              <button
+                                className="rounded border border-blue-500/50 bg-blue-500/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-500/20 transition-all"
+                                onClick={() => void handleRetryCombinedSubmission(record)}
+                                disabled={!canManageOwnerFlows}
+                              >
+                                Retry Failed Pair
+                              </button>
                             </div>
                           )}
                         </div>
@@ -3140,6 +3567,80 @@ export default function OwnerConsole() {
                       <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3">
                         <div className="text-xs text-red-400">Failed</div>
                         <div className="mt-1 text-2xl font-bold text-red-300">{adminMetrics.intents.totals.failed}</div>
+                      </div>
+                    </div>
+                  )}
+                  {adminMetrics.settlements && (
+                    <div className="mt-4 grid gap-3 md:grid-cols-2">
+                      <div className="rounded-lg border border-white/10 bg-slate-800/30 p-4">
+                        <div className="text-xs uppercase tracking-wide text-slate-400">Platform Fee Transfers</div>
+                        <div className="mt-2 grid grid-cols-4 gap-2 text-center text-xs">
+                          <div>
+                            <div className="text-slate-400">Pending</div>
+                            <div className="font-semibold text-white">{adminMetrics.settlements.platformFeeTransfers.pending}</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-400">Submitted</div>
+                            <div className="font-semibold text-amber-300">{adminMetrics.settlements.platformFeeTransfers.submitted}</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-400">Confirmed</div>
+                            <div className="font-semibold text-emerald-300">{adminMetrics.settlements.platformFeeTransfers.confirmed}</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-400">Failed</div>
+                            <div className="font-semibold text-red-300">{adminMetrics.settlements.platformFeeTransfers.failed}</div>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-white/10 bg-slate-800/30 p-4">
+                        <div className="text-xs uppercase tracking-wide text-slate-400">Profit Deposits</div>
+                        <div className="mt-2 grid grid-cols-4 gap-2 text-center text-xs">
+                          <div>
+                            <div className="text-slate-400">Pending</div>
+                            <div className="font-semibold text-white">{adminMetrics.settlements.profitDeposits.pending}</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-400">Submitted</div>
+                            <div className="font-semibold text-amber-300">{adminMetrics.settlements.profitDeposits.submitted}</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-400">Confirmed</div>
+                            <div className="font-semibold text-emerald-300">{adminMetrics.settlements.profitDeposits.confirmed}</div>
+                          </div>
+                          <div>
+                            <div className="text-slate-400">Failed</div>
+                            <div className="font-semibold text-red-300">{adminMetrics.settlements.profitDeposits.failed}</div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {adminMetrics.settlements && (
+                    <div className="mt-4 grid gap-3 md:grid-cols-4">
+                      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+                        <div className="text-xs text-amber-300">Stale Fee Transfers</div>
+                        <div className="mt-1 text-xl font-bold text-amber-200">
+                          {adminMetrics.settlements.anomalies.feeTransferStaleSubmitted}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+                        <div className="text-xs text-amber-300">Stale Profit Deposits</div>
+                        <div className="mt-1 text-xl font-bold text-amber-200">
+                          {adminMetrics.settlements.anomalies.profitDepositStaleSubmitted}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3">
+                        <div className="text-xs text-red-300">Orphaned Fee Intents</div>
+                        <div className="mt-1 text-xl font-bold text-red-200">
+                          {adminMetrics.settlements.anomalies.orphanedFeeTransfers}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3">
+                        <div className="text-xs text-red-300">Settlement Failures (24h)</div>
+                        <div className="mt-1 text-xl font-bold text-red-200">
+                          {adminMetrics.settlements.anomalies.settlementFailures24h}
+                        </div>
                       </div>
                     </div>
                   )}

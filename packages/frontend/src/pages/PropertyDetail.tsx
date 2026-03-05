@@ -16,8 +16,12 @@ import {
   fetchCampaignInvestments,
   EthUsdcQuoteResponse,
   fetchEthUsdcQuote,
+  fetchPropertyEquityClaims,
+  fetchPropertyProfitClaims,
   fetchProperty,
   CampaignResponse,
+  EquityClaimResponse,
+  ProfitClaimResponse,
   PropertyResponse,
 } from '../lib/api';
 import { BASE_SEPOLIA_USDC } from '../config/tokens.config';
@@ -47,6 +51,7 @@ const AlertIcon = ({ className }: { className: string }) => (
 const CROWDFUND_ABI = [
   'function invest(uint256 amountUSDC) external',
   'function claimTokens() external',
+  'function claimableTokens(address user) view returns (uint256)',
   'function claimRefund() external',
   'function usdcToken() view returns (address)',
 ];
@@ -76,10 +81,18 @@ const BASE_SEPOLIA_CHAIN_ID_HEX = '0x14A34';
 const CAMPAIGN_ACTIVE_STATE = 'ACTIVE';
 const CAMPAIGN_FAILED_STATE = 'FAILED';
 const ERC8021_SUFFIX = '0x80218021802180218021802180218021';
+const PENDING_CLAIMS_STORAGE_KEY = 'homeshare.pendingClaims';
 type CampaignPhase = 'NOT_STARTED' | 'ACTIVE' | 'FAILED' | 'ENDED' | 'UNKNOWN';
 
 type EthereumProvider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
+};
+
+type PendingClaim = {
+  txHash: string;
+  propertyId: string;
+  type: 'claim-profit' | 'claim-equity';
+  createdAt: string;
 };
 
 const getEthereumProvider = (): EthereumProvider | null => {
@@ -130,9 +143,44 @@ export default function PropertyDetail() {
   const [isClaimingProfit, setIsClaimingProfit] = useState(false);
   const [isClaimingRefund, setIsClaimingRefund] = useState(false);
   const [claimableProfitBaseUnits, setClaimableProfitBaseUnits] = useState<bigint | null>(null);
+  const [claimableEquityBaseUnits, setClaimableEquityBaseUnits] = useState<bigint | null>(null);
+  const [claimableEquityError, setClaimableEquityError] = useState('');
   const [myInvestedBaseUnits, setMyInvestedBaseUnits] = useState<bigint>(0n);
   const [nowMs, setNowMs] = useState(Date.now());
   const [selectedGalleryImage, setSelectedGalleryImage] = useState<string | null>(null);
+  const [pendingClaims, setPendingClaims] = useState<PendingClaim[]>([]);
+  const [propertyEquityClaims, setPropertyEquityClaims] = useState<EquityClaimResponse[]>([]);
+  const [propertyProfitClaims, setPropertyProfitClaims] = useState<ProfitClaimResponse[]>([]);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(PENDING_CLAIMS_STORAGE_KEY);
+      if (!raw) {
+        return;
+      }
+      const parsed = JSON.parse(raw) as PendingClaim[];
+      if (Array.isArray(parsed)) {
+        setPendingClaims(
+          parsed.filter(
+            (item) =>
+              typeof item?.txHash === 'string' &&
+              typeof item?.propertyId === 'string' &&
+              (item?.type === 'claim-profit' || item?.type === 'claim-equity')
+          )
+        );
+      }
+    } catch {
+      setPendingClaims([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PENDING_CLAIMS_STORAGE_KEY, JSON.stringify(pendingClaims));
+    } catch {
+      // Ignore storage write failures.
+    }
+  }, [pendingClaims]);
 
   useEffect(() => {
     let isMounted = true;
@@ -212,6 +260,15 @@ export default function PropertyDetail() {
   const canSwapEthOnBaseSepolia = Boolean(env.BASE_SEPOLIA_SWAP_ROUTER);
   const walletAvailable = getEthereumProvider() !== null;
   const txInFlight = isInvesting || isClaimingEquity || isClaimingProfit || isClaimingRefund;
+  const canClaimProfit = claimableProfitBaseUnits !== null && claimableProfitBaseUnits > 0n;
+  const canClaimEquity = claimableEquityBaseUnits !== null && claimableEquityBaseUnits > 0n;
+  const claimProfitUnavailableMessage =
+    claimableProfitBaseUnits === null ? 'Unable to read claimable profit right now.' : 'No claimable profit yet.';
+  const claimEquityUnavailableMessage = claimableEquityError
+    ? claimableEquityError
+    : claimableEquityBaseUnits === null
+      ? 'Unable to read claimable equity right now.'
+      : 'No claimable equity yet.';
   const normalizedEthAmount = useMemo(() => Number(amountEth), [amountEth]);
   const normalizedSlippagePercent = useMemo(() => Number(slippagePercent), [slippagePercent]);
   const swapFeeCandidates = useMemo(() => {
@@ -350,6 +407,20 @@ export default function PropertyDetail() {
       .filter((value): value is string => Boolean(value));
     return Array.from(new Set(merged));
   }, [property?.imageUrl, property?.imageUrls]);
+  const basescanTxUrl = (txHash: string) => `https://sepolia.basescan.org/tx/${txHash}`;
+  const visiblePendingClaims = useMemo(
+    () => pendingClaims.filter((item) => item.propertyId === property?.propertyId).slice(0, 4),
+    [pendingClaims, property?.propertyId]
+  );
+
+  const addPendingClaim = (next: PendingClaim) => {
+    setPendingClaims((current) => {
+      if (current.some((item) => item.txHash.toLowerCase() === next.txHash.toLowerCase())) {
+        return current;
+      }
+      return [next, ...current].slice(0, 20);
+    });
+  };
 
   const campaignPhaseBadge = useMemo(() => {
     if (campaignPhase === 'ACTIVE') {
@@ -472,6 +543,62 @@ export default function PropertyDetail() {
   }, [property?.crowdfundAddress]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const loadPropertyClaimHistory = async () => {
+      if (!property?.propertyId) {
+        if (!cancelled) {
+          setPropertyEquityClaims([]);
+          setPropertyProfitClaims([]);
+        }
+        return;
+      }
+      try {
+        const [equityClaims, profitClaims] = await Promise.all([
+          fetchPropertyEquityClaims(property.propertyId),
+          fetchPropertyProfitClaims(property.propertyId),
+        ]);
+        if (!cancelled) {
+          setPropertyEquityClaims(equityClaims);
+          setPropertyProfitClaims(profitClaims);
+        }
+      } catch (_error) {
+        // Keep previous claim history on transient failures.
+      }
+    };
+
+    void loadPropertyClaimHistory();
+    const timer = setInterval(() => {
+      void loadPropertyClaimHistory();
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [property?.propertyId]);
+
+  useEffect(() => {
+    if (pendingClaims.length === 0) {
+      return;
+    }
+    const indexedProfit = new Set(propertyProfitClaims.map((claim) => claim.txHash.toLowerCase()));
+    const indexedEquity = new Set(propertyEquityClaims.map((claim) => claim.txHash.toLowerCase()));
+    setPendingClaims((current) =>
+      current.filter((item) => {
+        if (item.propertyId !== property?.propertyId) {
+          return true;
+        }
+        const txHash = item.txHash.toLowerCase();
+        if (item.type === 'claim-profit') {
+          return !indexedProfit.has(txHash);
+        }
+        return !indexedEquity.has(txHash);
+      })
+    );
+  }, [pendingClaims.length, property?.propertyId, propertyEquityClaims, propertyProfitClaims]);
+
+  useEffect(() => {
     const timer = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
@@ -519,6 +646,50 @@ export default function PropertyDetail() {
       clearInterval(timer);
     };
   }, [connectedAddress, property?.profitDistributorAddress]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadClaimableEquity = async () => {
+      if (!property?.crowdfundAddress || !connectedAddress) {
+        setClaimableEquityBaseUnits(null);
+        setClaimableEquityError('');
+        return;
+      }
+
+      try {
+        const rpcUrl = (import.meta as ImportMeta & { env: Record<string, string> }).env
+          .VITE_BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
+        const provider = new JsonRpcProvider(rpcUrl);
+        const crowdfund = new Contract(property.crowdfundAddress, CROWDFUND_ABI, provider);
+        const claimable = (await crowdfund.claimableTokens(connectedAddress)) as bigint;
+        if (!cancelled) {
+          setClaimableEquityBaseUnits(claimable);
+          setClaimableEquityError('');
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setClaimableEquityBaseUnits(null);
+          const message = error instanceof Error ? error.message : 'Could not read claimable equity';
+          if (message.includes('Equity token not set')) {
+            setClaimableEquityError('Equity token is not configured for this campaign yet.');
+          } else {
+            setClaimableEquityError('Could not read claimable equity onchain.');
+          }
+        }
+      }
+    };
+
+    void loadClaimableEquity();
+    const timer = setInterval(() => {
+      void loadClaimableEquity();
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [connectedAddress, property?.crowdfundAddress]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1055,6 +1226,10 @@ export default function PropertyDetail() {
       setTxError('Property is not loaded yet.');
       return;
     }
+    if (!canClaimEquity) {
+      setTxError(claimEquityUnavailableMessage);
+      return;
+    }
 
     setIsClaimingEquity(true);
     try {
@@ -1069,6 +1244,12 @@ export default function PropertyDetail() {
         propertyId: property.propertyId,
         type: 'claim-equity',
       });
+      addPendingClaim({
+        txHash: tx.hash,
+        propertyId: property.propertyId,
+        type: 'claim-equity',
+        createdAt: new Date().toISOString(),
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to claim equity';
       setTxError(message);
@@ -1082,6 +1263,10 @@ export default function PropertyDetail() {
     setTxStatus('');
     if (!property) {
       setTxError('Property is not loaded yet.');
+      return;
+    }
+    if (!canClaimProfit) {
+      setTxError(claimProfitUnavailableMessage);
       return;
     }
 
@@ -1102,6 +1287,12 @@ export default function PropertyDetail() {
         txHash: tx.hash,
         propertyId: property.propertyId,
         type: 'claim-profit',
+      });
+      addPendingClaim({
+        txHash: tx.hash,
+        propertyId: property.propertyId,
+        type: 'claim-profit',
+        createdAt: new Date().toISOString(),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to claim profit';
@@ -1446,6 +1637,43 @@ export default function PropertyDetail() {
                     {txStatus}
                   </div>
                 )}
+                {visiblePendingClaims.length > 0 && (
+                  <div className="mb-4 rounded-lg bg-amber-500/10 border border-amber-500/30 px-4 py-3">
+                    <p className="text-amber-200 text-xs font-medium">
+                      Pending claim index sync ({visiblePendingClaims.length})
+                    </p>
+                    <div className="mt-2 space-y-2">
+                      {visiblePendingClaims.map((pending) => (
+                        <div
+                          key={`property-pending:${pending.txHash}`}
+                          className="rounded border border-amber-400/20 bg-slate-900/50 px-2 py-1.5 text-xs flex items-center justify-between gap-2"
+                        >
+                          <span className="text-amber-100 truncate">
+                            {pending.type === 'claim-profit' ? 'Profit claim' : 'Equity claim'}
+                          </span>
+                          <a
+                            href={basescanTxUrl(pending.txHash)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-amber-200 hover:text-amber-100 shrink-0"
+                          >
+                            View tx
+                          </a>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {!canClaimProfit && (
+                  <div className="mb-4 rounded-lg bg-slate-800/40 border border-slate-700/50 px-4 py-3 text-slate-300 text-xs">
+                    Profit claim status: {claimProfitUnavailableMessage}
+                  </div>
+                )}
+                {!canClaimEquity && (
+                  <div className="mb-4 rounded-lg bg-slate-800/40 border border-slate-700/50 px-4 py-3 text-slate-300 text-xs">
+                    Equity claim status: {claimEquityUnavailableMessage}
+                  </div>
+                )}
 
                 {/* Main CTA */}
                 <button
@@ -1460,17 +1688,25 @@ export default function PropertyDetail() {
                 <div className="space-y-2">
                   <button
                     onClick={handleClaimEquity}
-                    disabled={isClaimingEquity || !walletAvailable || txInFlight}
+                    disabled={isClaimingEquity || !walletAvailable || txInFlight || !canClaimEquity}
                     className="w-full py-3 border border-slate-700 text-slate-300 font-medium rounded-lg hover:bg-slate-800/50 transition disabled:opacity-60"
                   >
-                    {isClaimingEquity ? 'Claiming...' : 'Claim Equity'}
+                    {isClaimingEquity
+                      ? 'Claiming...'
+                      : canClaimEquity
+                        ? 'Claim Equity'
+                        : 'No claimable equity'}
                   </button>
                   <button
                     onClick={handleClaimProfit}
-                    disabled={isClaimingProfit || !walletAvailable || txInFlight}
+                    disabled={isClaimingProfit || !walletAvailable || txInFlight || !canClaimProfit}
                     className="w-full py-3 border border-slate-700 text-slate-300 font-medium rounded-lg hover:bg-slate-800/50 transition disabled:opacity-60"
                   >
-                    {isClaimingProfit ? 'Claiming...' : 'Claim Profit'}
+                    {isClaimingProfit
+                      ? 'Claiming...'
+                      : canClaimProfit
+                        ? 'Claim Profit'
+                        : 'No claimable profit'}
                   </button>
                   <button
                     onClick={handleClaimRefund}

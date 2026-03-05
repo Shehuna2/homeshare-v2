@@ -46,6 +46,14 @@ const PROFIT_DISTRIBUTOR_ABI = ['function claim() external'];
 const CROWDFUND_ABI = ['function claimTokens() external'];
 const BASE_SEPOLIA_CHAIN_ID_HEX = '0x14A34';
 const ERC8021_SUFFIX = '0x80218021802180218021802180218021';
+const PENDING_CLAIMS_STORAGE_KEY = 'homeshare.pendingClaims';
+
+type PendingClaim = {
+  txHash: string;
+  propertyId: string;
+  type: 'claim-profit' | 'claim-equity';
+  createdAt: string;
+};
 
 type EthereumProvider = {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
@@ -151,6 +159,7 @@ export default function InvestorDashboard() {
   const [showAllPayoutStatuses, setShowAllPayoutStatuses] = useState(false);
   const [showAllEquityClaims, setShowAllEquityClaims] = useState(false);
   const [showAllProfitClaims, setShowAllProfitClaims] = useState(false);
+  const [pendingClaims, setPendingClaims] = useState<PendingClaim[]>([]);
   const lastAutoAuthAddressRef = useRef<string | null>(null);
   const hasMatchingConnectedWallet =
     !!connectedWalletAddress &&
@@ -199,6 +208,15 @@ export default function InvestorDashboard() {
       setLoading(false);
     }
   }, [canFetchInvestorData, token]);
+
+  const addPendingClaim = useCallback((next: PendingClaim) => {
+    setPendingClaims((current) => {
+      if (current.some((item) => item.txHash.toLowerCase() === next.txHash.toLowerCase())) {
+        return current;
+      }
+      return [next, ...current].slice(0, 20);
+    });
+  }, []);
 
   const ensureBaseSepolia = async (provider: EthereumProvider) => {
     try {
@@ -253,6 +271,12 @@ export default function InvestorDashboard() {
         propertyId: status.propertyId,
         type: 'claim-profit',
       });
+      addPendingClaim({
+        txHash: tx.hash,
+        propertyId: status.propertyId,
+        type: 'claim-profit',
+        createdAt: new Date().toISOString(),
+      });
       setStatusMessage(`Profit claim confirmed: ${tx.hash}`);
       setClaimSuccessTxHash(tx.hash);
       await loadPortfolio();
@@ -295,6 +319,12 @@ export default function InvestorDashboard() {
         propertyId: status.propertyId,
         type: 'claim-equity',
       });
+      addPendingClaim({
+        txHash: tx.hash,
+        propertyId: status.propertyId,
+        type: 'claim-equity',
+        createdAt: new Date().toISOString(),
+      });
       setStatusMessage(`Equity claim confirmed: ${tx.hash}`);
       setClaimSuccessTxHash(tx.hash);
       await loadPortfolio();
@@ -306,6 +336,53 @@ export default function InvestorDashboard() {
       setClaimingEquityPropertyId(null);
     }
   };
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(PENDING_CLAIMS_STORAGE_KEY);
+      if (!raw) {
+        return;
+      }
+      const parsed = JSON.parse(raw) as PendingClaim[];
+      if (Array.isArray(parsed)) {
+        setPendingClaims(
+          parsed.filter(
+            (item) =>
+              typeof item?.txHash === 'string' &&
+              typeof item?.propertyId === 'string' &&
+              (item?.type === 'claim-profit' || item?.type === 'claim-equity')
+          )
+        );
+      }
+    } catch {
+      setPendingClaims([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PENDING_CLAIMS_STORAGE_KEY, JSON.stringify(pendingClaims));
+    } catch {
+      // Ignore storage write failures.
+    }
+  }, [pendingClaims]);
+
+  useEffect(() => {
+    if (pendingClaims.length === 0) {
+      return;
+    }
+    const indexedProfit = new Set(profitClaims.map((claim) => claim.txHash.toLowerCase()));
+    const indexedEquity = new Set(equityClaims.map((claim) => claim.txHash.toLowerCase()));
+    setPendingClaims((current) =>
+      current.filter((item) => {
+        const txHash = item.txHash.toLowerCase();
+        if (item.type === 'claim-profit') {
+          return !indexedProfit.has(txHash);
+        }
+        return !indexedEquity.has(txHash);
+      })
+    );
+  }, [equityClaims, pendingClaims.length, profitClaims]);
 
   useEffect(() => {
     let isMounted = true;
@@ -476,6 +553,7 @@ export default function InvestorDashboard() {
   const visibleProfitStatuses = showAllPayoutStatuses ? profitStatuses : profitStatuses.slice(0, 3);
   const visibleEquityClaims = showAllEquityClaims ? equityClaims : equityClaims.slice(0, 3);
   const visibleProfitClaims = showAllProfitClaims ? profitClaims : profitClaims.slice(0, 3);
+  const visiblePendingClaims = pendingClaims.slice(0, 4);
   const claimCenterItems = useMemo(
     () =>
       profitStatuses.filter(
@@ -585,6 +663,46 @@ export default function InvestorDashboard() {
             <div className="mb-6 rounded-xl bg-blue-500/10 border border-blue-500/30 px-6 py-4 flex gap-3">
               <AlertIcon className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" />
               <p className="text-blue-200 text-sm">Connect and authenticate to view your portfolio.</p>
+            </div>
+          )}
+          {canFetchInvestorData && pendingClaims.length > 0 && (
+            <div className="mb-6 rounded-xl bg-amber-500/10 border border-amber-500/30 px-6 py-4">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-amber-200 text-sm font-medium">
+                  {pendingClaims.length} claim transaction{pendingClaims.length === 1 ? '' : 's'} pending index sync
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void loadPortfolio()}
+                  className="text-xs font-semibold text-amber-200 hover:text-amber-100"
+                >
+                  Refresh now
+                </button>
+              </div>
+              <div className="mt-3 space-y-2">
+                {visiblePendingClaims.map((pending) => (
+                  <div
+                    key={`pending-claim:${pending.txHash}`}
+                    className="rounded-lg border border-amber-400/20 bg-slate-900/50 px-3 py-2 text-xs flex items-center justify-between gap-3"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="inline-flex h-2 w-2 rounded-full bg-amber-300 animate-pulse" />
+                      <span className="text-amber-100 truncate">
+                        {pending.type === 'claim-profit' ? 'Profit claim' : 'Equity claim'} · {pending.propertyId}
+                      </span>
+                    </div>
+                    <a
+                      href={basescanTxUrl(pending.txHash)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-amber-200 hover:text-amber-100 shrink-0"
+                      title="View on BaseScan"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 

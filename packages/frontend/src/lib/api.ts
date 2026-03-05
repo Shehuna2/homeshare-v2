@@ -313,6 +313,26 @@ export interface AdminMetricsResponse {
       failed: number;
     };
   };
+  settlements?: {
+    platformFeeTransfers: {
+      pending: number;
+      submitted: number;
+      confirmed: number;
+      failed: number;
+    };
+    profitDeposits: {
+      pending: number;
+      submitted: number;
+      confirmed: number;
+      failed: number;
+    };
+    anomalies: {
+      feeTransferStaleSubmitted: number;
+      profitDepositStaleSubmitted: number;
+      orphanedFeeTransfers: number;
+      settlementFailures24h: number;
+    };
+  };
 }
 
 export interface ProfitPreflightResponse {
@@ -1144,6 +1164,32 @@ export async function fetchCampaignInvestments(
   }
   const data = await response.json();
   return data.investments ?? [];
+}
+
+export async function fetchPropertyEquityClaims(
+  propertyId: string
+): Promise<EquityClaimResponse[]> {
+  const response = await fetch(
+    `${API_V1_BASE}/properties/${encodeURIComponent(propertyId)}/equity-claims`
+  );
+  if (!response.ok) {
+    throw new Error('Failed to fetch property equity claims');
+  }
+  const data = await response.json();
+  return data.equityClaims ?? [];
+}
+
+export async function fetchPropertyProfitClaims(
+  propertyId: string
+): Promise<ProfitClaimResponse[]> {
+  const response = await fetch(
+    `${API_V1_BASE}/properties/${encodeURIComponent(propertyId)}/profit-claims`
+  );
+  if (!response.ok) {
+    throw new Error('Failed to fetch property profit claims');
+  }
+  const data = await response.json();
+  return data.profitClaims ?? [];
 }
 
 export async function fetchMyEquityClaims(token: string): Promise<EquityClaimResponse[]> {

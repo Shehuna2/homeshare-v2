@@ -25,6 +25,7 @@ const startDelaySeconds = Number(process.env.PROPERTY_INTENT_START_DELAY_SECONDS
 const durationSeconds = Number(process.env.PROPERTY_INTENT_DURATION_SECONDS || 60 * 60 * 24 * 30);
 const pollIntervalMs = Number(process.env.PROPERTY_INTENT_POLL_INTERVAL_MS || 15000);
 const continuousMode = process.env.PROPERTY_INTENT_CONTINUOUS === 'true';
+const FUNDING_DUST_TOLERANCE_BASE_UNITS = 1n; // 0.000001 USDC (6 decimals)
 const ZERO_PRIVATE_KEY =
   '0x0000000000000000000000000000000000000000000000000000000000000000';
 
@@ -91,6 +92,17 @@ const symbolFromPropertyId = (propertyId) => {
   const cleaned = propertyId.replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
   if (!cleaned) return 'HSPROP';
   return cleaned.slice(0, 10);
+};
+
+const normalizeScenarioMultiplier = (value, fallback) => {
+  if (value === null || value === undefined) {
+    return fallback;
+  }
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0 || numeric > 100000) {
+    return fallback;
+  }
+  return Math.round(numeric);
 };
 
 const loadPendingIntents = async () =>
@@ -225,6 +237,15 @@ const upsertPropertyRecord = async ({
   baseMultiplierBps,
   optimisticMultiplierBps,
 }) => {
+  const normalizedConservativeMultiplierBps = normalizeScenarioMultiplier(
+    conservativeMultiplierBps,
+    8500
+  );
+  const normalizedBaseMultiplierBps = normalizeScenarioMultiplier(baseMultiplierBps, 10000);
+  const normalizedOptimisticMultiplierBps = normalizeScenarioMultiplier(
+    optimisticMultiplierBps,
+    12500
+  );
   const [rows] = await sequelize.query(
     `
     INSERT INTO properties (
@@ -313,9 +334,9 @@ const upsertPropertyRecord = async ({
         conservativeSellUsdcBaseUnits,
         baseSellUsdcBaseUnits,
         optimisticSellUsdcBaseUnits,
-        conservativeMultiplierBps,
-        baseMultiplierBps,
-        optimisticMultiplierBps,
+        conservativeMultiplierBps: normalizedConservativeMultiplierBps,
+        baseMultiplierBps: normalizedBaseMultiplierBps,
+        optimisticMultiplierBps: normalizedOptimisticMultiplierBps,
       },
     }
   );
@@ -392,6 +413,11 @@ const deployContractsForIntent = async (intent) => {
   if (targetUsdc <= 0n) {
     throw new Error('targetUsdcBaseUnits must be > 0');
   }
+  // Avoid edge-case failures where a campaign misses target by dust (1 base unit).
+  const effectiveTargetUsdc =
+    targetUsdc > FUNDING_DUST_TOLERANCE_BASE_UNITS
+      ? targetUsdc - FUNDING_DUST_TOLERANCE_BASE_UNITS
+      : targetUsdc;
   const estimatedSellUsdc =
     intent.estimatedSellUsdcBaseUnits && `${intent.estimatedSellUsdcBaseUnits}`.trim() !== ''
       ? BigInt(intent.estimatedSellUsdcBaseUnits)
@@ -429,7 +455,7 @@ const deployContractsForIntent = async (intent) => {
   if (endTimestamp <= startTimestamp) {
     throw new Error('Invalid campaign schedule: endTime must be after startTime');
   }
-  const totalEquityForSale = targetUsdc * 1_000_000_000_000n; // 6 decimals -> 18 decimals
+  const totalEquityForSale = effectiveTargetUsdc * 1_000_000_000_000n; // 6 decimals -> 18 decimals
 
   const deployOnce = async () => {
     const crowdfundFactory = new ContractFactory(
@@ -440,7 +466,7 @@ const deployContractsForIntent = async (intent) => {
     const crowdfund = await crowdfundFactory.deploy(
       intent.createdByAddress,
       usdcAddress,
-      targetUsdc,
+      effectiveTargetUsdc,
       startTimestamp,
       endTimestamp,
       totalEquityForSale,

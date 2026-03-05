@@ -6,6 +6,7 @@ import { sequelize } from '../../db/index.js';
 import { env } from '../../config/env.js';
 import { AuthenticatedRequest } from '../../middleware/auth.js';
 import { sendError } from '../../lib/apiError.js';
+import { getCrowdfundFeeInfo } from './crowdfundFee.js';
 import {
   BASE_SEPOLIA_CHAIN_ID,
   ValidationError,
@@ -308,6 +309,85 @@ const decodeCrowdfundState = (stateIndex: number): 'ACTIVE' | 'SUCCESS' | 'FAILE
   return 'ACTIVE';
 };
 
+const getConfiguredRpcUrl = (): string => {
+  const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL || process.env.BASE_MAINNET_RPC_URL || '';
+  if (!rpcUrl) {
+    throw new ValidationError('BASE_SEPOLIA_RPC_URL is not configured', 503);
+  }
+  return rpcUrl;
+};
+
+const resolveCampaignAddressForProperty = async (
+  chainId: number,
+  propertyId: string
+): Promise<string> => {
+  const rows = await sequelize.query<{ campaignAddress: string }>(
+    `
+    SELECT LOWER(contract_address) AS "campaignAddress"
+    FROM campaigns
+    WHERE chain_id = :chainId
+      AND property_id = :propertyId
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT 1
+    `,
+    {
+      type: QueryTypes.SELECT,
+      replacements: { chainId, propertyId },
+    }
+  );
+  const campaignAddress = rows[0]?.campaignAddress;
+  if (!campaignAddress) {
+    throw new ValidationError(
+      `No campaign found for property ${propertyId}. Finalize + withdraw can only run on deployed campaigns.`
+    );
+  }
+  return campaignAddress;
+};
+
+const assertSettlementIntentEligibility = async (
+  provider: JsonRpcProvider,
+  campaignAddress: string
+): Promise<void> => {
+  const normalizedCampaignAddress = normalizeAddress(campaignAddress, 'campaignAddress');
+  const [stateRaw, usdcRaw] = await Promise.all([
+    provider.call({
+      to: normalizedCampaignAddress,
+      data: crowdfundReadInterface.encodeFunctionData('state', []),
+    }),
+    provider.call({
+      to: normalizedCampaignAddress,
+      data: crowdfundReadInterface.encodeFunctionData('usdcToken', []),
+    }),
+  ]);
+  const [stateIndexRaw] = crowdfundReadInterface.decodeFunctionResult('state', stateRaw);
+  const [usdcAddressRaw] = crowdfundReadInterface.decodeFunctionResult('usdcToken', usdcRaw);
+  const state = decodeCrowdfundState(Number(stateIndexRaw));
+  const normalizedUsdcAddress = String(usdcAddressRaw).toLowerCase();
+
+  const balanceRaw = await provider.call({
+    to: normalizedUsdcAddress,
+    data: erc20ReadInterface.encodeFunctionData('balanceOf', [normalizedCampaignAddress]),
+  });
+  const [campaignBalanceRaw] = erc20ReadInterface.decodeFunctionResult('balanceOf', balanceRaw);
+  const campaignUsdcBalance = BigInt(campaignBalanceRaw);
+
+  if (state === 'ACTIVE') {
+    throw new ValidationError(
+      'Settlement intents are blocked: campaign is still ACTIVE. Finalize campaign first.'
+    );
+  }
+  if (state === 'FAILED') {
+    throw new ValidationError(
+      'Settlement intents are blocked: campaign FAILED and cannot receive settlement distribution.'
+    );
+  }
+  if (state === 'SUCCESS' && campaignUsdcBalance > 0n) {
+    throw new ValidationError(
+      'Settlement intents are blocked: withdraw campaign funds first before creating fee/profit intents.'
+    );
+  }
+};
+
 export const createPropertyIntent = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const adminAddress = requireAdminAddress(req);
@@ -495,6 +575,11 @@ export const createProfitDistributionIntent = async (req: AuthenticatedRequest, 
     );
     const usdcAmountBaseUnits = parseBaseUnits(req.body.usdcAmountBaseUnits, 'usdcAmountBaseUnits');
 
+    const rpcUrl = getConfiguredRpcUrl();
+    const provider = new JsonRpcProvider(rpcUrl);
+    const linkedCampaignAddress = await resolveCampaignAddressForProperty(chainId, propertyId);
+    await assertSettlementIntentEligibility(provider, linkedCampaignAddress);
+
     const [rows] = await sequelize.query(
       `
       INSERT INTO profit_distribution_intents (
@@ -567,6 +652,10 @@ export const createPlatformFeeIntent = async (req: AuthenticatedRequest, res: Re
         'platformFeeRecipient is required when usdcAmountBaseUnits is greater than 0'
       );
     }
+
+    const rpcUrl = getConfiguredRpcUrl();
+    const provider = new JsonRpcProvider(rpcUrl);
+    await assertSettlementIntentEligibility(provider, campaignAddress);
 
     const [rows] = await sequelize.query(
       `
@@ -723,6 +812,35 @@ export const createIntentBatch = async (req: AuthenticatedRequest, res: Response
           };
         })()
       : null;
+
+    const rpcUrl = getConfiguredRpcUrl();
+    const provider = new JsonRpcProvider(rpcUrl);
+    const eligibilityCheckedCampaigns = new Set<string>();
+    const checkCampaignEligibility = async (campaignAddress: string) => {
+      const normalized = campaignAddress.toLowerCase();
+      if (eligibilityCheckedCampaigns.has(normalized)) {
+        return;
+      }
+      await assertSettlementIntentEligibility(provider, normalized);
+      eligibilityCheckedCampaigns.add(normalized);
+    };
+
+    let profitCampaignAddress: string | null = null;
+    if (profitPayload) {
+      profitCampaignAddress = await resolveCampaignAddressForProperty(chainId, profitPayload.propertyId);
+      await checkCampaignEligibility(profitCampaignAddress);
+    }
+    if (platformPayload) {
+      await checkCampaignEligibility(platformPayload.campaignAddress);
+      if (
+        profitCampaignAddress &&
+        platformPayload.campaignAddress.toLowerCase() !== profitCampaignAddress.toLowerCase()
+      ) {
+        throw new ValidationError(
+          `Profit property campaign (${profitCampaignAddress}) does not match selected platform-fee campaign (${platformPayload.campaignAddress})`
+        );
+      }
+    }
 
     const result = await sequelize.transaction(async (tx) => {
       let profitIntent: Record<string, unknown> | null = null;
@@ -1004,6 +1122,7 @@ export const retryAdminIntent = async (req: AuthenticatedRequest, res: Response)
           error_message = NULL,
           submitted_at = NULL,
           confirmed_at = NULL,
+          attempt_count = 0,
           updated_at = NOW()
       WHERE id = :id
         AND created_by_address = :createdByAddress
@@ -1628,29 +1747,14 @@ export const getPlatformFeeFlowStatus = async (req: AuthenticatedRequest, res: R
       }
     );
 
-    const campaignRows = await sequelize.query<{
-      platformFeeBps: number | null;
-      platformFeeRecipient: string | null;
-      updatedAt: string;
-    }>(
-      `
-      SELECT
-        platform_fee_bps AS "platformFeeBps",
-        LOWER(platform_fee_recipient) AS "platformFeeRecipient",
-        updated_at AS "updatedAt"
-      FROM campaigns
-      WHERE LOWER(campaign_address) = :campaignAddress
-      ORDER BY updated_at DESC
-      LIMIT 1
-      `,
-      {
-        type: QueryTypes.SELECT,
-        replacements: { campaignAddress: campaignAddress.toLowerCase() },
-      }
-    );
+    const onchainFeeInfo = await getCrowdfundFeeInfo(campaignAddress);
 
     const latestIntent = latestIntentRows[0] ?? null;
-    const currentCampaign = campaignRows[0] ?? null;
+    const currentCampaign = {
+      platformFeeBps: onchainFeeInfo.platformFeeBps,
+      platformFeeRecipient: onchainFeeInfo.platformFeeRecipient,
+      updatedAt: null,
+    };
 
     const targetBps =
       requestedFeeBps ?? (latestIntent ? Number(latestIntent.platformFeeBps) : null);
