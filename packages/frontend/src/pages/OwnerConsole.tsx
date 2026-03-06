@@ -101,6 +101,16 @@ type FullSettlementStep = {
   status: FullSettlementStepState;
   message: string;
 };
+type ConsoleTab = 'operations' | 'properties' | 'monitoring';
+type UnifiedIntentRow = {
+  id: string;
+  type: IntentType;
+  subject: string;
+  status: string;
+  attemptCount: number;
+  errorMessage: string | null;
+  createdAt: string;
+};
 
 const getProfitIntentBlockerMessage = (
   intent: ProfitDistributionIntentResponse | null | undefined
@@ -258,6 +268,80 @@ const formatUsdcInput = (amount: number): string =>
     maximumFractionDigits: 6,
   });
 
+type MapPickerCenter = { lat: number; lng: number; zoom: number };
+type MapSearchResult = { lat: number; lng: number; label: string };
+const DEFAULT_MAP_PICKER_CENTER: MapPickerCenter = { lat: 6.5244, lng: 3.3792, zoom: 13 };
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+const projectMercator = (lat: number, lng: number, zoom: number) => {
+  const worldSize = 256 * 2 ** zoom;
+  const x = ((lng + 180) / 360) * worldSize;
+  const sinLat = Math.sin((lat * Math.PI) / 180);
+  const y = (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * worldSize;
+  return { x, y, worldSize };
+};
+
+const unprojectMercator = (x: number, y: number, zoom: number) => {
+  const worldSize = 256 * 2 ** zoom;
+  const lng = (x / worldSize) * 360 - 180;
+  const n = Math.PI - (2 * Math.PI * y) / worldSize;
+  const lat = (180 / Math.PI) * Math.atan(Math.sinh(n));
+  return {
+    lat: clamp(lat, -90, 90),
+    lng: ((lng + 540) % 360) - 180,
+  };
+};
+
+const toMapCenterFromInputs = (latitudeInput: string, longitudeInput: string): MapPickerCenter => {
+  const lat = Number(latitudeInput);
+  const lng = Number(longitudeInput);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return DEFAULT_MAP_PICKER_CENTER;
+  }
+  return {
+    lat: clamp(lat, -90, 90),
+    lng: clamp(lng, -180, 180),
+    zoom: 13,
+  };
+};
+
+const searchMapLocations = async (query: string): Promise<MapSearchResult[]> => {
+  const trimmed = query.trim();
+  if (trimmed.length < 3) {
+    return [];
+  }
+  const endpoint = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&q=${encodeURIComponent(
+    trimmed
+  )}`;
+  const response = await fetch(endpoint, {
+    headers: {
+      Accept: 'application/json',
+    },
+  });
+  if (!response.ok) {
+    throw new Error('Location search failed');
+  }
+  const payload = (await response.json()) as Array<{
+    lat?: string;
+    lon?: string;
+    display_name?: string;
+  }>;
+  return payload
+    .map((item) => {
+      const lat = Number(item.lat);
+      const lng = Number(item.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        return null;
+      }
+      return {
+        lat: clamp(lat, -90, 90),
+        lng: clamp(lng, -180, 180),
+        label: item.display_name || `${lat.toFixed(6)}, ${lng.toFixed(6)}`,
+      } satisfies MapSearchResult;
+    })
+    .filter((item): item is MapSearchResult => item !== null);
+};
+
 export default function OwnerConsole() {
   const dispatch = useDispatch();
   const { address, role, token, isAuthenticated } = useSelector((state: RootState) => state.user);
@@ -265,6 +349,9 @@ export default function OwnerConsole() {
   const [showCreatePropertyModal, setShowCreatePropertyModal] = useState(false);
   const [showCreateProfitModal, setShowCreateProfitModal] = useState(false);
   const [showPlatformFeeModal, setShowPlatformFeeModal] = useState(false);
+  const [showAdvancedActions, setShowAdvancedActions] = useState(false);
+  const [activeTab, setActiveTab] = useState<ConsoleTab>('operations');
+  const [intentFilter, setIntentFilter] = useState<'all' | IntentType>('all');
   const [showCombinedIntentModal, setShowCombinedIntentModal] = useState(false);
   const [showSmartWithdrawModal, setShowSmartWithdrawModal] = useState(false);
   const [smartWithdrawCampaign, setSmartWithdrawCampaign] = useState<CampaignResponse | null>(null);
@@ -288,9 +375,18 @@ export default function OwnerConsole() {
   const [showEditPropertyModal, setShowEditPropertyModal] = useState(false);
   const [showAllCampaignOverview] = useState(false);
   const [showAllCombinedSubmissions] = useState(false);
-  const [showAllPropertyIntents] = useState(false);
-  const [showAllProfitIntents] = useState(false);
-  const [showAllPlatformFeeIntents] = useState(false);
+  const [showCreateMapPicker, setShowCreateMapPicker] = useState(false);
+  const [showEditMapPicker, setShowEditMapPicker] = useState(false);
+  const [createMapCenter, setCreateMapCenter] = useState<MapPickerCenter>(DEFAULT_MAP_PICKER_CENTER);
+  const [editMapCenter, setEditMapCenter] = useState<MapPickerCenter>(DEFAULT_MAP_PICKER_CENTER);
+  const [createMapSearch, setCreateMapSearch] = useState('');
+  const [editMapSearch, setEditMapSearch] = useState('');
+  const [createMapSearchResults, setCreateMapSearchResults] = useState<MapSearchResult[]>([]);
+  const [editMapSearchResults, setEditMapSearchResults] = useState<MapSearchResult[]>([]);
+  const [createMapSearchError, setCreateMapSearchError] = useState('');
+  const [editMapSearchError, setEditMapSearchError] = useState('');
+  const [isCreateMapSearching, setIsCreateMapSearching] = useState(false);
+  const [isEditMapSearching, setIsEditMapSearching] = useState(false);
   const [propertyForm, setPropertyForm] = useState({
     propertyId: '',
     name: '',
@@ -299,6 +395,8 @@ export default function OwnerConsole() {
     imageUrl: '',
     imageUrlsText: '',
     youtubeEmbedUrl: '',
+    latitude: '',
+    longitude: '',
     targetUsdc: '',
     estimatedSellUsdc: '',
     conservativeSellUsdc: '',
@@ -361,6 +459,8 @@ export default function OwnerConsole() {
     imageUrl: '',
     imageUrlsText: '',
     youtubeEmbedUrl: '',
+    latitude: '',
+    longitude: '',
     estimatedSellUsdc: '',
     conservativeSellUsdc: '',
     baseSellUsdc: '',
@@ -376,6 +476,8 @@ export default function OwnerConsole() {
     imageUrl: '',
     imageUrlsText: '',
     youtubeEmbedUrl: '',
+    latitude: '',
+    longitude: '',
     estimatedSellUsdc: '',
     conservativeSellUsdc: '',
     baseSellUsdc: '',
@@ -515,13 +617,45 @@ export default function OwnerConsole() {
   const visibleCombinedHistory = showAllCombinedSubmissions
     ? combinedHistory
     : combinedHistory.slice(0, 2);
-  const visiblePropertyIntents = showAllPropertyIntents
-    ? propertyIntents
-    : propertyIntents.slice(0, 2);
-  const visibleProfitIntents = showAllProfitIntents ? profitIntents : profitIntents.slice(0, 2);
-  const visiblePlatformFeeIntents = showAllPlatformFeeIntents
-    ? platformFeeIntents
-    : platformFeeIntents.slice(0, 2);
+  const unifiedIntentRows = useMemo<UnifiedIntentRow[]>(() => {
+    const rows: UnifiedIntentRow[] = [];
+    for (const intent of propertyIntents) {
+      rows.push({
+        id: intent.id,
+        type: 'property',
+        subject: intent.propertyId,
+        status: intent.status,
+        attemptCount: intent.attemptCount,
+        errorMessage: intent.errorMessage,
+        createdAt: intent.createdAt,
+      });
+    }
+    for (const intent of profitIntents) {
+      rows.push({
+        id: intent.id,
+        type: 'profit',
+        subject: intent.propertyId,
+        status: intent.status,
+        attemptCount: intent.attemptCount,
+        errorMessage: intent.errorMessage,
+        createdAt: intent.createdAt,
+      });
+    }
+    for (const intent of platformFeeIntents) {
+      rows.push({
+        id: intent.id,
+        type: 'platformFee',
+        subject: intent.campaignAddress,
+        status: intent.status,
+        attemptCount: intent.attemptCount,
+        errorMessage: intent.errorMessage,
+        createdAt: intent.createdAt,
+      });
+    }
+    return rows
+      .filter((row) => intentFilter === 'all' || row.type === intentFilter)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [intentFilter, platformFeeIntents, profitIntents, propertyIntents]);
   const filteredAdminProperties = useMemo(() => {
     const query = propertyCatalogQuery.trim().toLowerCase();
     return adminProperties.filter((property) => {
@@ -646,6 +780,83 @@ export default function OwnerConsole() {
     setEditPropertyForm((prev) => ({ ...prev, [field]: value }));
   };
 
+  const buildMapPreviewUrl = (
+    center: MapPickerCenter,
+    marker?: { lat: number; lng: number } | null
+  ) => {
+    const markerSegment = marker
+      ? `&markers=${marker.lat.toFixed(6)},${marker.lng.toFixed(6)},red-pushpin`
+      : '';
+    return `https://staticmap.openstreetmap.de/staticmap.php?center=${center.lat.toFixed(
+      6
+    )},${center.lng.toFixed(6)}&zoom=${center.zoom}&size=640x320${markerSegment}`;
+  };
+
+  const pickCoordinateFromMap = (
+    event: { currentTarget: HTMLImageElement; clientX: number; clientY: number },
+    center: MapPickerCenter
+  ) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const clickX = event.clientX - rect.left;
+    const clickY = event.clientY - rect.top;
+    const centerPx = projectMercator(center.lat, center.lng, center.zoom);
+    const clickedX = centerPx.x + (clickX - rect.width / 2);
+    const clickedY = centerPx.y + (clickY - rect.height / 2);
+    return unprojectMercator(clickedX, clickedY, center.zoom);
+  };
+
+  const toggleCreateMapPicker = () => {
+    if (!showCreateMapPicker) {
+      setCreateMapCenter(toMapCenterFromInputs(propertyForm.latitude, propertyForm.longitude));
+      setCreateMapSearchResults([]);
+      setCreateMapSearchError('');
+    }
+    setShowCreateMapPicker((prev) => !prev);
+  };
+
+  const toggleEditMapPicker = () => {
+    if (!showEditMapPicker) {
+      setEditMapCenter(toMapCenterFromInputs(editPropertyForm.latitude, editPropertyForm.longitude));
+      setEditMapSearchResults([]);
+      setEditMapSearchError('');
+    }
+    setShowEditMapPicker((prev) => !prev);
+  };
+
+  const handleCreateMapSearch = async () => {
+    setCreateMapSearchError('');
+    setIsCreateMapSearching(true);
+    try {
+      const results = await searchMapLocations(createMapSearch);
+      setCreateMapSearchResults(results);
+      if (results.length === 0) {
+        setCreateMapSearchError('No locations found. Try a more specific address.');
+      }
+    } catch (error) {
+      setCreateMapSearchError((error as Error).message || 'Location search failed');
+      setCreateMapSearchResults([]);
+    } finally {
+      setIsCreateMapSearching(false);
+    }
+  };
+
+  const handleEditMapSearch = async () => {
+    setEditMapSearchError('');
+    setIsEditMapSearching(true);
+    try {
+      const results = await searchMapLocations(editMapSearch);
+      setEditMapSearchResults(results);
+      if (results.length === 0) {
+        setEditMapSearchError('No locations found. Try a more specific address.');
+      }
+    } catch (error) {
+      setEditMapSearchError((error as Error).message || 'Location search failed');
+      setEditMapSearchResults([]);
+    } finally {
+      setIsEditMapSearching(false);
+    }
+  };
+
   const handlePlatformFeeChange = (
     field: keyof typeof platformFeeForm,
     value: string
@@ -744,6 +955,10 @@ export default function OwnerConsole() {
           .map((line) => line.trim())
           .filter(Boolean),
         youtubeEmbedUrl: propertyForm.youtubeEmbedUrl.trim() || undefined,
+        latitude:
+          propertyForm.latitude.trim() === '' ? null : Number(propertyForm.latitude),
+        longitude:
+          propertyForm.longitude.trim() === '' ? null : Number(propertyForm.longitude),
         targetUsdcBaseUnits: Math.round(Number(propertyForm.targetUsdc || '0') * 1_000_000).toString(),
         estimatedSellUsdcBaseUnits:
           propertyForm.estimatedSellUsdc.trim() === ''
@@ -801,6 +1016,18 @@ export default function OwnerConsole() {
           throw new Error(`${label} must be greater than 0 when provided`);
         }
       }
+      if (propertyForm.latitude.trim() !== '') {
+        const latitude = Number(propertyForm.latitude);
+        if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
+          throw new Error('Latitude must be between -90 and 90');
+        }
+      }
+      if (propertyForm.longitude.trim() !== '') {
+        const longitude = Number(propertyForm.longitude);
+        if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+          throw new Error('Longitude must be between -180 and 180');
+        }
+      }
       for (const [label, value] of [
         ['Conservative multiplier', propertyForm.conservativeMultiplierPct],
         ['Base multiplier', propertyForm.baseMultiplierPct],
@@ -830,6 +1057,10 @@ export default function OwnerConsole() {
       void loadCampaigns();
       void loadIntents(token);
       setShowCreatePropertyModal(false);
+      setShowCreateMapPicker(false);
+      setCreateMapSearch('');
+      setCreateMapSearchResults([]);
+      setCreateMapSearchError('');
       setPropertyForm({
         propertyId: '',
         name: '',
@@ -838,6 +1069,8 @@ export default function OwnerConsole() {
         imageUrl: '',
         imageUrlsText: '',
         youtubeEmbedUrl: '',
+        latitude: '',
+        longitude: '',
         targetUsdc: '',
         estimatedSellUsdc: '',
         conservativeSellUsdc: '',
@@ -1522,6 +1755,14 @@ export default function OwnerConsole() {
       imageUrl: property.imageUrl ?? '',
       imageUrlsText: (property.imageUrls ?? []).join('\n'),
       youtubeEmbedUrl: property.youtubeEmbedUrl ?? '',
+      latitude:
+        property.latitude === null || property.latitude === undefined
+          ? ''
+          : String(property.latitude),
+      longitude:
+        property.longitude === null || property.longitude === undefined
+          ? ''
+          : String(property.longitude),
       estimatedSellUsdc: property.estimatedSellUsdcBaseUnits
         ? (Number(property.estimatedSellUsdcBaseUnits) / 1_000_000).toString()
         : '',
@@ -1547,6 +1788,11 @@ export default function OwnerConsole() {
     setEditingPropertyId(property.propertyId);
     setEditPropertyForm(nextForm);
     setInitialEditPropertyForm(nextForm);
+    setEditMapCenter(toMapCenterFromInputs(nextForm.latitude, nextForm.longitude));
+    setShowEditMapPicker(false);
+    setEditMapSearch('');
+    setEditMapSearchResults([]);
+    setEditMapSearchError('');
     setShowEditPropertyModal(true);
   };
 
@@ -1559,6 +1805,18 @@ export default function OwnerConsole() {
     setErrorMessage('');
     setStatusMessage('Updating property metadata...');
     try {
+      if (editPropertyForm.latitude.trim() !== '') {
+        const latitude = Number(editPropertyForm.latitude);
+        if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
+          throw new Error('Latitude must be between -90 and 90');
+        }
+      }
+      if (editPropertyForm.longitude.trim() !== '') {
+        const longitude = Number(editPropertyForm.longitude);
+        if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+          throw new Error('Longitude must be between -180 and 180');
+        }
+      }
       await updateAdminProperty(token, editingPropertyId, {
         name: editPropertyForm.name.trim(),
         location: editPropertyForm.location.trim(),
@@ -1569,6 +1827,8 @@ export default function OwnerConsole() {
           .map((line) => line.trim())
           .filter(Boolean),
         youtubeEmbedUrl: editPropertyForm.youtubeEmbedUrl.trim() || null,
+        latitude: editPropertyForm.latitude.trim() === '' ? null : Number(editPropertyForm.latitude),
+        longitude: editPropertyForm.longitude.trim() === '' ? null : Number(editPropertyForm.longitude),
         estimatedSellUsdcBaseUnits:
           editPropertyForm.estimatedSellUsdc.trim() === ''
             ? null
@@ -1601,6 +1861,10 @@ export default function OwnerConsole() {
 
       await Promise.all([loadCampaigns(), loadAdminProperties(token)]);
       setShowEditPropertyModal(false);
+      setShowEditMapPicker(false);
+      setEditMapSearch('');
+      setEditMapSearchResults([]);
+      setEditMapSearchError('');
       setEditingPropertyId('');
       setStatusMessage('Property updated successfully.');
     } catch (error) {
@@ -2613,19 +2877,12 @@ export default function OwnerConsole() {
   void handleResetFailedIntents;
 
   return (
-    <div className="relative min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
-      {/* Animated background orbs */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-1/4 -left-64 w-96 h-96 bg-blue-500/20 rounded-full blur-3xl animate-pulse" style={{ animationDelay: '0s' }} />
-        <div className="absolute bottom-1/3 -right-64 w-80 h-80 bg-emerald-500/15 rounded-full blur-3xl animate-pulse" style={{ animationDelay: '2s' }} />
-      </div>
-
-      {/* Content */}
+    <div className="relative min-h-screen bg-transparent text-white">
       <div className="relative z-10 py-10">
         <div className="container mx-auto px-4">
           {/* Hero Section */}
-          <div className="mb-8 rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-2xl shadow-black/40 backdrop-blur">
-            <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">
+          <div className="mb-8 rounded-[32px] border border-white/10 bg-[#08111f]/90 p-7 shadow-[0_20px_80px_rgba(0,0,0,0.35)] backdrop-blur-xl">
+            <h1 className="text-4xl font-semibold tracking-tight text-white">
               Admin Console
             </h1>
             <p className="mt-2 text-slate-300">
@@ -2648,7 +2905,7 @@ export default function OwnerConsole() {
           </div>
 
           {/* Session & Controls Bar */}
-          <div className="mb-8 rounded-2xl border border-white/10 bg-slate-900/50 px-4 py-4 shadow-xl shadow-black/25 backdrop-blur">
+          <div className="mb-8 rounded-[22px] border border-white/10 bg-[#08111f]/90 px-4 py-4 shadow-[0_20px_60px_rgba(0,0,0,0.28)] backdrop-blur">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="text-sm text-slate-300">
                 Connected: {connectedWalletAddress ? `${connectedWalletAddress.slice(0, 6)}...${connectedWalletAddress.slice(-4)}` : 'Not connected'}
@@ -2658,25 +2915,18 @@ export default function OwnerConsole() {
                 {canViewOwnerConsole && (
                   <>
                     <button
-                      className="rounded-lg bg-gradient-to-r from-emerald-600 to-emerald-500 px-4 py-2 text-white font-medium hover:shadow-lg hover:shadow-emerald-500/30 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
-                      onClick={() => setShowCreatePropertyModal(true)}
+                      className="rounded-lg border border-emerald-500/60 bg-emerald-500/15 px-4 py-2 text-emerald-200 font-medium hover:bg-emerald-500/25 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+                      onClick={() => {
+                        setShowCreateMapPicker(false);
+                        setCreateMapCenter(DEFAULT_MAP_PICKER_CENTER);
+                        setCreateMapSearch('');
+                        setCreateMapSearchResults([]);
+                        setCreateMapSearchError('');
+                        setShowCreatePropertyModal(true);
+                      }}
                       disabled={!canManageOwnerFlows}
                     >
                       Create Property
-                    </button>
-                    <button
-                      className="rounded-lg border border-blue-500/50 bg-blue-500/10 px-4 py-2 text-blue-300 hover:bg-blue-500/20 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
-                      onClick={() => setShowCreateProfitModal(true)}
-                      disabled={!canManageOwnerFlows}
-                    >
-                      Create Profit Intent
-                    </button>
-                    <button
-                      className="rounded-lg border border-purple-500/50 bg-purple-500/10 px-4 py-2 text-purple-300 hover:bg-purple-500/20 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
-                      onClick={() => setShowPlatformFeeModal(true)}
-                      disabled={!canManageOwnerFlows}
-                    >
-                      Create Platform Fee Intent
                     </button>
                     <button
                       className="rounded-lg border border-slate-600 bg-slate-800/50 px-4 py-2 text-slate-300 hover:bg-slate-700/50 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
@@ -2684,6 +2934,13 @@ export default function OwnerConsole() {
                       disabled={!canManageOwnerFlows}
                     >
                       Settlement Wizard
+                    </button>
+                    <button
+                      className="rounded-lg border border-blue-500/50 bg-blue-500/10 px-4 py-2 text-blue-300 hover:bg-blue-500/20 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+                      onClick={() => setShowAdvancedActions((prev) => !prev)}
+                      disabled={!canManageOwnerFlows}
+                    >
+                      Advanced
                     </button>
                   </>
                 )}
@@ -2698,6 +2955,52 @@ export default function OwnerConsole() {
               </div>
             </div>
           </div>
+
+          {canViewOwnerConsole && showAdvancedActions && (
+            <div className="mb-6 rounded-xl border border-blue-500/30 bg-blue-500/5 p-3 backdrop-blur">
+              <p className="mb-2 text-xs uppercase tracking-wide text-blue-200">Advanced Actions</p>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  className="rounded-lg border border-blue-500/50 bg-blue-500/10 px-3 py-2 text-sm text-blue-300 hover:bg-blue-500/20 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+                  onClick={() => setShowCreateProfitModal(true)}
+                  disabled={!canManageOwnerFlows}
+                >
+                  Create Profit Intent
+                </button>
+                <button
+                  className="rounded-lg border border-purple-500/50 bg-purple-500/10 px-3 py-2 text-sm text-purple-300 hover:bg-purple-500/20 disabled:opacity-60 disabled:cursor-not-allowed transition-all"
+                  onClick={() => setShowPlatformFeeModal(true)}
+                  disabled={!canManageOwnerFlows}
+                >
+                  Create Platform Fee Intent
+                </button>
+              </div>
+            </div>
+          )}
+
+          {canViewOwnerConsole && (
+            <div className="mb-6 rounded-2xl border border-white/10 bg-slate-900/50 p-2 shadow-xl shadow-black/25 backdrop-blur">
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                {[
+                  { key: 'operations', label: 'Operations' },
+                  { key: 'properties', label: 'Properties' },
+                  { key: 'monitoring', label: 'Monitoring' },
+                ].map((tab) => (
+                  <button
+                    key={tab.key}
+                    className={`rounded-xl px-4 py-2 text-sm font-medium transition-all ${
+                      activeTab === tab.key
+                        ? 'bg-cyan-500/20 text-cyan-200 border border-cyan-400/40'
+                        : 'bg-slate-800/40 text-slate-300 border border-slate-700/50 hover:bg-slate-700/50'
+                    }`}
+                    onClick={() => setActiveTab(tab.key as ConsoleTab)}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Status Messages */}
           {(statusMessage || errorMessage) && (
@@ -2740,6 +3043,10 @@ export default function OwnerConsole() {
                     className="rounded-lg border border-slate-600 px-3 py-1 text-sm text-slate-200 hover:bg-slate-800/70"
                     onClick={() => {
                       setShowCreatePropertyModal(false);
+                      setShowCreateMapPicker(false);
+                      setCreateMapSearch('');
+                      setCreateMapSearchResults([]);
+                      setCreateMapSearchError('');
                       setPropertyImageFile(null);
                       setPropertyImageUploadProgress(0);
                       setPropertyImageUploadState('idle');
@@ -2832,6 +3139,141 @@ export default function OwnerConsole() {
                     value={propertyForm.youtubeEmbedUrl}
                     onChange={(event) => handlePropertyChange('youtubeEmbedUrl', event.target.value)}
                   />
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <input
+                      className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                      placeholder="Latitude (optional)"
+                      value={propertyForm.latitude}
+                      onChange={(event) => handlePropertyChange('latitude', event.target.value)}
+                    />
+                    <input
+                      className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                      placeholder="Longitude (optional)"
+                      value={propertyForm.longitude}
+                      onChange={(event) => handlePropertyChange('longitude', event.target.value)}
+                    />
+                  </div>
+                  <div className="rounded-lg border border-slate-700/60 bg-slate-900/50 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs text-slate-400">
+                        Additional option: pick coordinates from map
+                      </p>
+                      <button
+                        type="button"
+                        className="rounded border border-slate-600 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800/70 transition-all"
+                        onClick={toggleCreateMapPicker}
+                      >
+                        {showCreateMapPicker ? 'Hide Map Picker' : 'Pick on Map'}
+                      </button>
+                    </div>
+                    {showCreateMapPicker && (
+                      <div className="mt-3 space-y-2">
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={createMapSearch}
+                            onChange={(event) => setCreateMapSearch(event.target.value)}
+                            placeholder="Search address or place"
+                            className="w-full rounded border border-slate-700 bg-slate-900/60 px-3 py-2 text-sm text-white focus:border-cyan-500/60 focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            className="rounded border border-cyan-500/60 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-60"
+                            onClick={() => void handleCreateMapSearch()}
+                            disabled={isCreateMapSearching || createMapSearch.trim().length < 3}
+                          >
+                            {isCreateMapSearching ? 'Searching...' : 'Search'}
+                          </button>
+                        </div>
+                        {createMapSearchError && (
+                          <p className="text-xs text-amber-300">{createMapSearchError}</p>
+                        )}
+                        {createMapSearchResults.length > 0 && (
+                          <div className="max-h-32 space-y-1 overflow-y-auto rounded border border-slate-700/60 bg-slate-950/60 p-2">
+                            {createMapSearchResults.map((result) => (
+                              <button
+                                type="button"
+                                key={`${result.lat}-${result.lng}-${result.label}`}
+                                className="w-full rounded px-2 py-1 text-left text-xs text-slate-200 hover:bg-slate-800/70"
+                                onClick={() => {
+                                  setCreateMapCenter({
+                                    lat: result.lat,
+                                    lng: result.lng,
+                                    zoom: 15,
+                                  });
+                                  handlePropertyChange('latitude', result.lat.toFixed(6));
+                                  handlePropertyChange('longitude', result.lng.toFixed(6));
+                                }}
+                              >
+                                {result.label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <img
+                          src={buildMapPreviewUrl(
+                            createMapCenter,
+                            Number.isFinite(Number(propertyForm.latitude)) &&
+                              Number.isFinite(Number(propertyForm.longitude))
+                              ? {
+                                  lat: Number(propertyForm.latitude),
+                                  lng: Number(propertyForm.longitude),
+                                }
+                              : null
+                          )}
+                          alt="Create property map picker"
+                          className="h-48 w-full cursor-crosshair rounded border border-slate-700 object-cover"
+                          onClick={(event) => {
+                            const picked = pickCoordinateFromMap(event, createMapCenter);
+                            handlePropertyChange('latitude', picked.lat.toFixed(6));
+                            handlePropertyChange('longitude', picked.lng.toFixed(6));
+                            setCreateMapCenter((prev) => ({ ...prev, lat: picked.lat, lng: picked.lng }));
+                          }}
+                        />
+                        <div className="flex flex-wrap items-center gap-2">
+                          <label className="text-xs text-slate-400">
+                            Zoom
+                            <input
+                              type="range"
+                              min={3}
+                              max={18}
+                              step={1}
+                              value={createMapCenter.zoom}
+                              onChange={(event) =>
+                                setCreateMapCenter((prev) => ({
+                                  ...prev,
+                                  zoom: Number(event.target.value),
+                                }))
+                              }
+                              className="ml-2 align-middle"
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            className="rounded border border-slate-600 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800/70 transition-all"
+                            onClick={() =>
+                              setCreateMapCenter(toMapCenterFromInputs(propertyForm.latitude, propertyForm.longitude))
+                            }
+                          >
+                            Center on Current Coordinates
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded border border-cyan-500/60 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-500/10 transition-all"
+                            onClick={() => {
+                              handlePropertyChange('latitude', createMapCenter.lat.toFixed(6));
+                              handlePropertyChange('longitude', createMapCenter.lng.toFixed(6));
+                            }}
+                          >
+                            Use Map Center
+                          </button>
+                        </div>
+                        <p className="text-xs text-slate-500">
+                          Click on the map to set exact coordinates.
+                        </p>
+                      </div>
+                    )}
+                  </div>
                   <div className="grid grid-cols-2 gap-4">
                     <input
                       className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
@@ -2919,11 +3361,15 @@ export default function OwnerConsole() {
                   <div className="sticky bottom-0 z-10 -mx-6 -mb-6 flex justify-end gap-2 border-t border-white/10 bg-slate-900/80 px-6 py-4 backdrop-blur">
                     <button
                       className="rounded-lg border border-slate-600 px-4 py-2 text-slate-200 hover:bg-slate-800/60 transition-all"
-                      onClick={() => {
-                        setShowCreatePropertyModal(false);
-                        setPropertyImageFile(null);
-                        setPropertyImageUploadProgress(0);
-                        setPropertyImageUploadState('idle');
+                    onClick={() => {
+                      setShowCreatePropertyModal(false);
+                      setShowCreateMapPicker(false);
+                      setCreateMapSearch('');
+                      setCreateMapSearchResults([]);
+                      setCreateMapSearchError('');
+                      setPropertyImageFile(null);
+                      setPropertyImageUploadProgress(0);
+                      setPropertyImageUploadState('idle');
                         setPropertyImageUploadDebug('');
                       }}
                     >
@@ -2958,6 +3404,10 @@ export default function OwnerConsole() {
                     className="rounded-lg border border-slate-600 px-3 py-1 text-sm text-slate-200 hover:bg-slate-800/70"
                     onClick={() => {
                       setShowEditPropertyModal(false);
+                      setShowEditMapPicker(false);
+                      setEditMapSearch('');
+                      setEditMapSearchResults([]);
+                      setEditMapSearchError('');
                       setEditingPropertyId('');
                     }}
                   >
@@ -3003,10 +3453,153 @@ export default function OwnerConsole() {
                     value={editPropertyForm.youtubeEmbedUrl}
                     onChange={(event) => handleEditPropertyChange('youtubeEmbedUrl', event.target.value)}
                   />
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <input
+                      className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                      placeholder="Latitude"
+                      value={editPropertyForm.latitude}
+                      onChange={(event) => handleEditPropertyChange('latitude', event.target.value)}
+                    />
+                    <input
+                      className="w-full rounded-lg border border-slate-700/60 bg-slate-900/70 px-4 py-2 text-slate-100 placeholder-slate-400 focus:border-blue-500/50 focus:outline-none transition-all"
+                      placeholder="Longitude"
+                      value={editPropertyForm.longitude}
+                      onChange={(event) => handleEditPropertyChange('longitude', event.target.value)}
+                    />
+                  </div>
+                  <div className="rounded-lg border border-slate-700/60 bg-slate-900/50 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs text-slate-400">
+                        Additional option: pick coordinates from map
+                      </p>
+                      <button
+                        type="button"
+                        className="rounded border border-slate-600 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800/70 transition-all"
+                        onClick={toggleEditMapPicker}
+                      >
+                        {showEditMapPicker ? 'Hide Map Picker' : 'Pick on Map'}
+                      </button>
+                    </div>
+                    {showEditMapPicker && (
+                      <div className="mt-3 space-y-2">
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            value={editMapSearch}
+                            onChange={(event) => setEditMapSearch(event.target.value)}
+                            placeholder="Search address or place"
+                            className="w-full rounded border border-slate-700 bg-slate-900/60 px-3 py-2 text-sm text-white focus:border-cyan-500/60 focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            className="rounded border border-cyan-500/60 px-3 py-2 text-xs text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-60"
+                            onClick={() => void handleEditMapSearch()}
+                            disabled={isEditMapSearching || editMapSearch.trim().length < 3}
+                          >
+                            {isEditMapSearching ? 'Searching...' : 'Search'}
+                          </button>
+                        </div>
+                        {editMapSearchError && (
+                          <p className="text-xs text-amber-300">{editMapSearchError}</p>
+                        )}
+                        {editMapSearchResults.length > 0 && (
+                          <div className="max-h-32 space-y-1 overflow-y-auto rounded border border-slate-700/60 bg-slate-950/60 p-2">
+                            {editMapSearchResults.map((result) => (
+                              <button
+                                type="button"
+                                key={`${result.lat}-${result.lng}-${result.label}`}
+                                className="w-full rounded px-2 py-1 text-left text-xs text-slate-200 hover:bg-slate-800/70"
+                                onClick={() => {
+                                  setEditMapCenter({
+                                    lat: result.lat,
+                                    lng: result.lng,
+                                    zoom: 15,
+                                  });
+                                  handleEditPropertyChange('latitude', result.lat.toFixed(6));
+                                  handleEditPropertyChange('longitude', result.lng.toFixed(6));
+                                }}
+                              >
+                                {result.label}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <img
+                          src={buildMapPreviewUrl(
+                            editMapCenter,
+                            Number.isFinite(Number(editPropertyForm.latitude)) &&
+                              Number.isFinite(Number(editPropertyForm.longitude))
+                              ? {
+                                  lat: Number(editPropertyForm.latitude),
+                                  lng: Number(editPropertyForm.longitude),
+                                }
+                              : null
+                          )}
+                          alt="Edit property map picker"
+                          className="h-48 w-full cursor-crosshair rounded border border-slate-700 object-cover"
+                          onClick={(event) => {
+                            const picked = pickCoordinateFromMap(event, editMapCenter);
+                            handleEditPropertyChange('latitude', picked.lat.toFixed(6));
+                            handleEditPropertyChange('longitude', picked.lng.toFixed(6));
+                            setEditMapCenter((prev) => ({ ...prev, lat: picked.lat, lng: picked.lng }));
+                          }}
+                        />
+                        <div className="flex flex-wrap items-center gap-2">
+                          <label className="text-xs text-slate-400">
+                            Zoom
+                            <input
+                              type="range"
+                              min={3}
+                              max={18}
+                              step={1}
+                              value={editMapCenter.zoom}
+                              onChange={(event) =>
+                                setEditMapCenter((prev) => ({
+                                  ...prev,
+                                  zoom: Number(event.target.value),
+                                }))
+                              }
+                              className="ml-2 align-middle"
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            className="rounded border border-slate-600 px-2 py-1 text-xs text-slate-200 hover:bg-slate-800/70 transition-all"
+                            onClick={() =>
+                              setEditMapCenter(toMapCenterFromInputs(editPropertyForm.latitude, editPropertyForm.longitude))
+                            }
+                          >
+                            Center on Current Coordinates
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded border border-cyan-500/60 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-500/10 transition-all"
+                            onClick={() => {
+                              handleEditPropertyChange('latitude', editMapCenter.lat.toFixed(6));
+                              handleEditPropertyChange('longitude', editMapCenter.lng.toFixed(6));
+                            }}
+                          >
+                            Use Map Center
+                          </button>
+                        </div>
+                        <p className="text-xs text-slate-500">
+                          Click on the map to set exact coordinates.
+                        </p>
+                      </div>
+                    )}
+                  </div>
                   <div className="sticky bottom-0 z-10 -mx-6 -mb-6 flex justify-end gap-2 border-t border-white/10 bg-slate-900/80 px-6 py-4 backdrop-blur">
                     <button
                       className="rounded-lg border border-slate-600 px-4 py-2 text-slate-200 hover:bg-slate-800/60 transition-all"
-                      onClick={() => setEditPropertyForm(initialEditPropertyForm)}
+                      onClick={() => {
+                        setEditPropertyForm(initialEditPropertyForm);
+                        setEditMapCenter(
+                          toMapCenterFromInputs(
+                            initialEditPropertyForm.latitude,
+                            initialEditPropertyForm.longitude
+                          )
+                        );
+                      }}
                     >
                       Reset Changes
                     </button>
@@ -3014,6 +3607,10 @@ export default function OwnerConsole() {
                       className="rounded-lg border border-slate-600 px-4 py-2 text-slate-200 hover:bg-slate-800/60 transition-all"
                       onClick={() => {
                         setShowEditPropertyModal(false);
+                        setShowEditMapPicker(false);
+                        setEditMapSearch('');
+                        setEditMapSearchResults([]);
+                        setEditMapSearchError('');
                         setEditingPropertyId('');
                       }}
                     >
@@ -3507,8 +4104,10 @@ export default function OwnerConsole() {
 
           {canViewOwnerConsole && (
             <>
-              {/* Property Catalog */}
-              <div className="mb-8 rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
+              {activeTab === 'properties' && (
+                <>
+                  {/* Property Catalog */}
+                  <div className="mb-8 rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
                 <div className="mb-4 flex items-center justify-between">
                   <h2 className="text-2xl font-bold text-white">Property Catalog</h2>
                   <button
@@ -3601,12 +4200,16 @@ export default function OwnerConsole() {
                     </div>
                   </div>
                 )}
-              </div>
+                  </div>
+                </>
+              )}
 
-              {/* Campaign Overview */}
-              <div className="mb-8 rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
+              {activeTab === 'operations' && (
+                <>
+                  {/* Campaign Overview */}
+                  <div className="mb-8 rounded-[28px] border border-white/10 bg-[#08111f]/90 p-6 shadow-[0_20px_80px_rgba(0,0,0,0.35)] backdrop-blur-xl">
                 <div className="mb-4 flex items-center justify-between">
-                  <h2 className="text-2xl font-bold text-white">Campaign Fee Overview</h2>
+                  <h2 className="text-xl font-semibold text-white">Campaign Operations</h2>
                   <button
                     className="rounded-lg border border-slate-600 px-3 py-1 text-sm text-slate-200 hover:bg-slate-800/60 transition-all"
                     onClick={() => void loadCampaigns()}
@@ -3623,12 +4226,12 @@ export default function OwnerConsole() {
                     <div className="max-h-96 overflow-auto">
                       <table className="min-w-full text-sm">
                         <thead className="sticky top-0 z-10 bg-slate-900/80 border-b border-white/10">
-                          <tr className="text-left text-xs uppercase tracking-wide text-slate-400">
-                            <th className="px-3 py-2 font-semibold">Property</th>
-                            <th className="px-3 py-2 font-semibold">State</th>
-                            <th className="px-3 py-2 font-semibold">Raised / Target</th>
-                            <th className="px-3 py-2 font-semibold">Fee</th>
-                            <th className="px-3 py-2 font-semibold text-right">Actions</th>
+                          <tr className="text-left text-[11px] uppercase tracking-[0.18em] text-slate-400">
+                            <th className="px-3 py-2.5 font-semibold">Property</th>
+                            <th className="px-3 py-2.5 font-semibold">State</th>
+                            <th className="px-3 py-2.5 font-semibold">Raised / Target</th>
+                            <th className="px-3 py-2.5 font-semibold">Fee</th>
+                            <th className="px-3 py-2.5 font-semibold text-right">Actions</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-white/5">
@@ -3644,13 +4247,13 @@ export default function OwnerConsole() {
 
                             return (
                               <tr key={campaign.campaignAddress} className="bg-slate-900/30 hover:bg-slate-900/50 transition-colors">
-                                <td className="px-3 py-2 align-middle">
+                                <td className="px-3 py-3 align-middle">
                                   <div className="font-medium text-white">{campaign.propertyId}</div>
                                   <div className="font-mono text-[11px] text-slate-400">
                                     {campaign.campaignAddress.slice(0, 8)}...
                                   </div>
                                 </td>
-                                <td className="px-3 py-2 align-middle">
+                                <td className="px-3 py-3 align-middle">
                                   <span
                                     className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
                                       campaign.state === 'SUCCESS'
@@ -3663,7 +4266,7 @@ export default function OwnerConsole() {
                                     {campaign.state}
                                   </span>
                                 </td>
-                                <td className="px-3 py-2 align-middle font-mono text-xs text-slate-300">
+                                <td className="px-3 py-3 align-middle font-mono text-xs text-slate-300">
                                   {raisedUsdc.toLocaleString(undefined, {
                                     maximumFractionDigits: 0,
                                   })}{' '}
@@ -3672,20 +4275,20 @@ export default function OwnerConsole() {
                                     maximumFractionDigits: 0,
                                   })}
                                 </td>
-                                <td className="px-3 py-2 align-middle text-slate-300">
+                                <td className="px-3 py-3 align-middle text-slate-300">
                                   {campaign.platformFeeBps === null ? 'Not set' : `${(campaign.platformFeeBps / 100).toFixed(2)}%`}
                                 </td>
-                                <td className="px-3 py-2 align-middle text-right">
+                                <td className="px-3 py-3 align-middle text-right">
                                   <div className="flex flex-wrap items-center justify-end gap-2">
                                     <button
-                                      className="rounded border border-blue-500/50 bg-blue-500/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-500/20 disabled:opacity-60 transition-all"
+                                      className="rounded border border-blue-500/50 bg-blue-500/10 px-2 py-1 text-[11px] text-blue-300 hover:bg-blue-500/20 disabled:opacity-60 transition-all"
                                       onClick={() => void handleCheckCampaignLifecycle(campaign.campaignAddress)}
                                       disabled={!canManageOwnerFlows || isChecking || isFinalizing || isWithdrawing}
                                     >
                                       {isChecking ? 'Checking...' : 'Check'}
                                     </button>
                                     <button
-                                      className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-xs text-amber-300 hover:bg-amber-500/20 disabled:opacity-60 transition-all"
+                                      className="rounded border border-amber-500/50 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300 hover:bg-amber-500/20 disabled:opacity-60 transition-all"
                                       onClick={() => void handleFinalizeCampaign(campaign.campaignAddress)}
                                       disabled={
                                         !canManageOwnerFlows ||
@@ -3698,7 +4301,7 @@ export default function OwnerConsole() {
                                       {isFinalizing ? 'Finalizing...' : 'Finalize'}
                                     </button>
                                     <button
-                                      className="rounded border border-violet-500/50 bg-violet-500/10 px-2 py-1 text-xs text-violet-300 hover:bg-violet-500/20 disabled:opacity-60 transition-all"
+                                      className="rounded border border-violet-500/50 bg-violet-500/10 px-2 py-1 text-[11px] text-violet-300 hover:bg-violet-500/20 disabled:opacity-60 transition-all"
                                       onClick={() => void handleRepairCampaignSetup(campaign.campaignAddress)}
                                       disabled={
                                         !canManageOwnerFlows ||
@@ -3712,7 +4315,7 @@ export default function OwnerConsole() {
                                       {isRepairing ? 'Repairing...' : 'Repair Setup'}
                                     </button>
                                     <button
-                                      className="rounded border border-emerald-500/50 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-60 transition-all"
+                                      className="rounded border border-emerald-500/50 bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-60 transition-all"
                                       onClick={() => void openSmartWithdrawModal(campaign)}
                                       disabled={
                                         !canManageOwnerFlows ||
@@ -3725,7 +4328,7 @@ export default function OwnerConsole() {
                                       {isWithdrawing ? 'Withdrawing...' : 'Withdraw'}
                                     </button>
                                     <button
-                                      className="rounded border border-cyan-500/50 bg-cyan-500/10 px-2 py-1 text-xs text-cyan-300 hover:bg-cyan-500/20 disabled:opacity-60 transition-all"
+                                      className="rounded border border-cyan-500/50 bg-cyan-500/10 px-2 py-1 text-[11px] text-cyan-300 hover:bg-cyan-500/20 disabled:opacity-60 transition-all"
                                       onClick={() => void openFullSettlementModal(campaign)}
                                       disabled={
                                         !canManageOwnerFlows ||
@@ -3740,31 +4343,35 @@ export default function OwnerConsole() {
                                     </button>
                                   </div>
                                   {lifecycle && (
-                                    <div className="mt-2 rounded border border-white/10 bg-slate-950/60 px-2 py-2 text-left text-[10px] text-slate-300">
-                                      <p className="font-semibold text-slate-200">Post-Settlement Health</p>
-                                      <p className="mt-1">
-                                        Equity token:{' '}
-                                        <span
-                                          className={
-                                            lifecycle.postSettlementHealth.equityTokenSet
-                                              ? 'text-emerald-300'
-                                              : 'text-amber-300'
-                                          }
-                                        >
-                                          {lifecycle.postSettlementHealth.equityTokenSet ? 'Configured' : 'Missing'}
-                                        </span>
-                                      </p>
-                                      <p>
-                                        Wallets: {lifecycle.postSettlementHealth.investorWallets} total,{' '}
-                                        {lifecycle.postSettlementHealth.equityClaimableWallets} equity-claimable,{' '}
-                                        {lifecycle.postSettlementHealth.profitClaimableWallets} profit-claimable
-                                      </p>
-                                      {lifecycle.postSettlementHealth.claimabilityReadErrors > 0 && (
-                                        <p className="text-amber-300">
-                                          Claim read warnings: {lifecycle.postSettlementHealth.claimabilityReadErrors}
+                                    <details className="mt-2 rounded border border-white/10 bg-slate-950/60 px-2 py-1 text-left text-[11px] text-slate-300">
+                                      <summary className="cursor-pointer select-none text-slate-300">
+                                        Diagnostics
+                                      </summary>
+                                      <div className="mt-2 space-y-1">
+                                        <p>
+                                          Equity token:{' '}
+                                          <span
+                                            className={
+                                              lifecycle.postSettlementHealth.equityTokenSet
+                                                ? 'text-emerald-300'
+                                                : 'text-amber-300'
+                                            }
+                                          >
+                                            {lifecycle.postSettlementHealth.equityTokenSet ? 'Configured' : 'Missing'}
+                                          </span>
                                         </p>
-                                      )}
-                                    </div>
+                                        <p>
+                                          Wallets: {lifecycle.postSettlementHealth.investorWallets} total,{' '}
+                                          {lifecycle.postSettlementHealth.equityClaimableWallets} equity-claimable,{' '}
+                                          {lifecycle.postSettlementHealth.profitClaimableWallets} profit-claimable
+                                        </p>
+                                        {lifecycle.postSettlementHealth.claimabilityReadErrors > 0 && (
+                                          <p className="text-amber-300">
+                                            Claim read warnings: {lifecycle.postSettlementHealth.claimabilityReadErrors}
+                                          </p>
+                                        )}
+                                      </div>
+                                    </details>
                                   )}
                                 </td>
                               </tr>
@@ -3775,10 +4382,10 @@ export default function OwnerConsole() {
                     </div>
                   </div>
                 )}
-              </div>
+                  </div>
 
-              {/* Combined Submissions */}
-              <div className="mb-8 rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
+                  {/* Combined Submissions */}
+                  <div className="mb-8 rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
                 <div className="mb-4 flex items-center justify-between">
                   <h2 className="text-2xl font-bold text-white">Recent Combined Submissions</h2>
                   <div className="flex items-center gap-2">
@@ -3822,7 +4429,7 @@ export default function OwnerConsole() {
                       return (
                         <div
                           key={record.id}
-                          className={`rounded-lg border p-3 backdrop-blur transition-all ${
+                          className={`rounded-xl border p-3 backdrop-blur transition-all ${
                             outcome === 'completed'
                               ? 'border-emerald-500/30 bg-emerald-500/5'
                               : outcome === 'needs_attention'
@@ -3830,10 +4437,12 @@ export default function OwnerConsole() {
                                 : 'border-white/10 bg-slate-800/30'
                           }`}
                         >
-                          <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-start justify-between gap-3">
                             <div>
                               <div className="font-medium text-white">{record.propertyId}</div>
-                              <div className="text-xs text-slate-400">{record.campaignAddress}</div>
+                              <div className="mt-0.5 font-mono text-[11px] text-slate-400">
+                                {record.campaignAddress.slice(0, 10)}...{record.campaignAddress.slice(-8)}
+                              </div>
                             </div>
                             <span
                               className={`text-xs px-2 py-1 rounded font-medium ${
@@ -3851,67 +4460,72 @@ export default function OwnerConsole() {
                                   : 'In Progress'}
                             </span>
                           </div>
-                          {profitIntent && (
-                            <div className="mt-2 flex items-center gap-2 text-xs">
-                              <span className="text-slate-400">Profit:</span>
-                              <span className={`${intentStatusClass(profitIntent.status)} px-2 py-0.5 rounded font-medium`}>
-                                {profitIntent.status}
+
+                          <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+                            {platformIntent && (
+                              <span className={`rounded px-2 py-0.5 font-medium ${intentStatusClass(platformIntent.status)}`}>
+                                Fee: {platformIntent.status}
                               </span>
-                            </div>
-                          )}
-                          {platformIntent && (
-                            <div className="mt-1 flex items-center gap-2 text-xs">
-                              <span className="text-slate-400">Platform Fee:</span>
-                              <span className={`${intentStatusClass(platformIntent.status)} px-2 py-0.5 rounded font-medium`}>
-                                {platformIntent.status}
+                            )}
+                            {profitIntent && (
+                              <span className={`rounded px-2 py-0.5 font-medium ${intentStatusClass(profitIntent.status)}`}>
+                                Profit: {profitIntent.status}
                               </span>
-                            </div>
-                          )}
+                            )}
+                            <span className={`rounded px-2 py-0.5 font-medium ${intentStatusClass(depositStepStatus)}`}>
+                              Deposit: {depositStepStatus}
+                            </span>
+                          </div>
+
                           {(record.grossSettlementUsdc || record.netDistributionUsdc) && (
-                            <div className="mt-2 text-xs text-slate-300">
-                              Gross {record.grossSettlementUsdc ?? '--'} USDC | Fee {record.platformFeeUsdc ?? '--'} USDC | Net {record.netDistributionUsdc ?? '--'} USDC
+                            <div className="mt-2 rounded-lg border border-white/10 bg-slate-900/40 px-2.5 py-2 text-xs text-slate-300">
+                              <span className="font-medium text-slate-100">Gross</span> {record.grossSettlementUsdc ?? '--'} USDC
+                              <span className="mx-2 text-slate-500">•</span>
+                              <span className="font-medium text-slate-100">Fee</span> {record.platformFeeUsdc ?? '--'} USDC
+                              <span className="mx-2 text-slate-500">•</span>
+                              <span className="font-medium text-slate-100">Net</span> {record.netDistributionUsdc ?? '--'} USDC
                             </div>
                           )}
-                          <div className="mt-2 rounded border border-white/10 bg-slate-900/35 p-2 text-xs text-slate-300">
-                            <div className="font-medium text-slate-200">Execution Order</div>
-                            <div className="mt-1 flex flex-wrap items-center gap-2">
-                              <span className="text-slate-400">1. setPlatformFee</span>
-                              <span
-                                className={`${intentStatusClass(
-                                  progress?.campaignMatchesTarget === true
+
+                          <details className="mt-2 rounded border border-white/10 bg-slate-900/25 px-2 py-1.5 text-xs text-slate-300">
+                            <summary className="cursor-pointer select-none text-slate-300">View execution details</summary>
+                            <div className="mt-2 space-y-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-slate-400">1. setPlatformFee</span>
+                                <span
+                                  className={`${intentStatusClass(
+                                    progress?.campaignMatchesTarget === true
+                                      ? 'confirmed'
+                                      : platformIntent?.status ?? 'pending'
+                                  )} px-2 py-0.5 rounded font-medium`}
+                                >
+                                  {progress?.campaignMatchesTarget === true
                                     ? 'confirmed'
-                                    : platformIntent?.status ?? 'pending'
-                                )} px-2 py-0.5 rounded font-medium`}
-                              >
-                                {progress?.campaignMatchesTarget === true
-                                  ? 'confirmed'
-                                  : platformIntent?.status ?? 'pending'}
-                              </span>
-                            </div>
-                            {(record.platformFeeUsdc && Number(record.platformFeeUsdc) > 0) && (
-                              <div className="mt-1 flex flex-wrap items-center gap-2">
-                                <span className="text-slate-400">2. transferPlatformFee</span>
-                                <span className={`${intentStatusClass(platformIntent?.status ?? 'pending')} px-2 py-0.5 rounded font-medium`}>
-                                  {platformIntent?.status ?? 'pending'}
+                                    : platformIntent?.status ?? 'pending'}
                                 </span>
                               </div>
-                            )}
-                            <div className="mt-1 flex flex-wrap items-center gap-2">
-                              <span className="text-slate-400">3. depositInvestorProfit</span>
-                              <span
-                                className={`${intentStatusClass(
-                                  depositStepStatus
-                                )} px-2 py-0.5 rounded font-medium`}
-                              >
-                                {depositStepStatus}
-                              </span>
-                            </div>
-                            {profitBlockerMessage && (
-                              <div className="mt-2 rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-[11px] text-red-200">
-                                {profitBlockerMessage}
+                              {(record.platformFeeUsdc && Number(record.platformFeeUsdc) > 0) && (
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="text-slate-400">2. transferPlatformFee</span>
+                                  <span className={`${intentStatusClass(platformIntent?.status ?? 'pending')} px-2 py-0.5 rounded font-medium`}>
+                                    {platformIntent?.status ?? 'pending'}
+                                  </span>
+                                </div>
+                              )}
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-slate-400">3. depositInvestorProfit</span>
+                                <span className={`${intentStatusClass(depositStepStatus)} px-2 py-0.5 rounded font-medium`}>
+                                  {depositStepStatus}
+                                </span>
                               </div>
-                            )}
-                          </div>
+                              {profitBlockerMessage && (
+                                <div className="mt-2 rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-[11px] text-red-200">
+                                  {profitBlockerMessage}
+                                </div>
+                              )}
+                            </div>
+                          </details>
+
                           {(profitIntent?.status === 'failed' || platformIntent?.status === 'failed') && (
                             <div className="mt-2">
                               <button
@@ -3928,243 +4542,128 @@ export default function OwnerConsole() {
                     })}
                   </div>
                 )}
-              </div>
+                  </div>
+                </>
+              )}
 
-              {/* Intents Overview */}
-              <div className="grid gap-6 lg:grid-cols-3">
-                {/* Property Intents */}
-                <div className="rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
-                  <h3 className="mb-4 text-lg font-bold text-white">Property Intents</h3>
-                  {propertyIntents.length === 0 ? (
-                    <p className="text-sm text-slate-400">No property intents yet.</p>
-                  ) : (
-                    <div className="space-y-3">
-                      {visiblePropertyIntents.map((intent) => (
-                        <div key={intent.id} className="rounded-lg border border-white/10 bg-slate-800/30 p-3">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-sm font-medium text-white">{intent.propertyId}</span>
-                            <span className={`text-xs px-2 py-0.5 rounded font-medium ${intentStatusClass(intent.status)}`}>
-                              {intent.status}
-                            </span>
-                          </div>
-                          <div className="mt-2 text-xs text-slate-400">Attempts: {intent.attemptCount}</div>
-                          {intent.errorMessage && (
-                            <div className="mt-1 text-xs text-red-400">{intent.errorMessage}</div>
-                          )}
-                          {intent.status === 'failed' && (
-                            <div className="mt-2 flex gap-2">
-                              <button
-                                className="rounded border border-blue-500/50 bg-blue-500/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-500/20 disabled:opacity-50 transition-all"
-                                onClick={() => void handleIntentAction('retry', 'property', intent.id)}
-                                disabled={!canManageOwnerFlows || intentActionLoadingKey === `retry:property:${intent.id}`}
-                              >
-                                {intentActionLoadingKey === `retry:property:${intent.id}` ? 'Retrying...' : 'Retry'}
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      ))}
+              {activeTab === 'monitoring' && (
+                <>
+                  {/* Intents Overview */}
+                  <div className="rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
+                    <div className="mb-4 flex items-center justify-between gap-3">
+                      <h2 className="text-2xl font-bold text-white">Intents</h2>
+                      <div className="flex flex-wrap gap-2">
+                        {[
+                          { key: 'all', label: 'All' },
+                          { key: 'property', label: 'Property' },
+                          { key: 'profit', label: 'Profit' },
+                          { key: 'platformFee', label: 'Platform Fee' },
+                        ].map((option) => (
+                          <button
+                            key={option.key}
+                            className={`rounded-md px-2.5 py-1 text-xs transition ${
+                              intentFilter === option.key
+                                ? 'border border-cyan-400/40 bg-cyan-500/20 text-cyan-200'
+                                : 'border border-slate-700/50 bg-slate-800/40 text-slate-300 hover:bg-slate-700/50'
+                            }`}
+                            onClick={() => setIntentFilter(option.key as 'all' | IntentType)}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  )}
-                </div>
+                    {unifiedIntentRows.length === 0 ? (
+                      <p className="text-sm text-slate-400">No intents for current filter.</p>
+                    ) : (
+                      <div className="overflow-hidden rounded-lg border border-white/10">
+                        <div className="max-h-96 overflow-auto">
+                          <table className="min-w-full text-sm">
+                            <thead className="sticky top-0 z-10 border-b border-white/10 bg-slate-900/80">
+                              <tr className="text-left text-xs uppercase tracking-wide text-slate-400">
+                                <th className="px-3 py-2 font-semibold">Type</th>
+                                <th className="px-3 py-2 font-semibold">Subject</th>
+                                <th className="px-3 py-2 font-semibold">Status</th>
+                                <th className="px-3 py-2 font-semibold">Attempts</th>
+                                <th className="px-3 py-2 font-semibold text-right">Action</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-white/5">
+                              {unifiedIntentRows.slice(0, 80).map((row) => (
+                                <tr key={`${row.type}:${row.id}`} className="bg-slate-900/30 hover:bg-slate-900/50">
+                                  <td className="px-3 py-2 text-slate-200">{row.type}</td>
+                                  <td className="px-3 py-2 text-slate-300">{row.subject}</td>
+                                  <td className="px-3 py-2">
+                                    <span className={`rounded px-2 py-0.5 text-xs font-medium ${intentStatusClass(row.status)}`}>
+                                      {row.status}
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-2 text-slate-400">{row.attemptCount}</td>
+                                  <td className="px-3 py-2 text-right">
+                                    {row.status === 'failed' ? (
+                                      <button
+                                        className="rounded border border-blue-500/50 bg-blue-500/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-500/20 disabled:opacity-50 transition-all"
+                                        onClick={() => void handleIntentAction('retry', row.type, row.id)}
+                                        disabled={!canManageOwnerFlows || intentActionLoadingKey === `retry:${row.type}:${row.id}`}
+                                      >
+                                        {intentActionLoadingKey === `retry:${row.type}:${row.id}` ? 'Retrying...' : 'Retry'}
+                                      </button>
+                                    ) : (
+                                      <span className="text-xs text-slate-500">-</span>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
 
-                {/* Profit Intents */}
-                <div className="rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
-                  <h3 className="mb-4 text-lg font-bold text-white">Profit Intents</h3>
-                  {profitIntents.length === 0 ? (
-                    <p className="text-sm text-slate-400">No profit intents yet.</p>
-                  ) : (
-                    <div className="space-y-3">
-                      {visibleProfitIntents.map((intent) => (
-                        <div key={intent.id} className="rounded-lg border border-white/10 bg-slate-800/30 p-3">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-sm font-medium text-white">{intent.propertyId}</span>
-                            <span className={`text-xs px-2 py-0.5 rounded font-medium ${intentStatusClass(intent.status)}`}>
-                              {intent.status}
-                            </span>
+                  {/* System Health */}
+                  {adminMetrics && (
+                    <div className="mt-8 rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
+                      <h2 className="mb-4 text-xl font-bold text-white">System Health</h2>
+                      {adminMetrics.intents?.totals && (
+                        <div className="grid gap-3 md:grid-cols-4">
+                          <div className="rounded-lg border border-white/10 bg-slate-800/30 p-3">
+                            <div className="text-xs text-slate-400">Pending</div>
+                            <div className="mt-1 text-2xl font-bold text-white">{adminMetrics.intents.totals.pending}</div>
                           </div>
-                          <div className="mt-2 text-xs text-slate-400">
-                            ${(Number(intent.usdcAmountBaseUnits) / 1_000_000).toLocaleString()} USDC
+                          <div className="rounded-lg border border-white/10 bg-slate-800/30 p-3">
+                            <div className="text-xs text-slate-400">Submitted</div>
+                            <div className="mt-1 text-2xl font-bold text-white">{adminMetrics.intents.totals.submitted}</div>
                           </div>
-                          {intent.status === 'failed' && (
-                            <div className="mt-2 flex gap-2">
-                              <button
-                                className="rounded border border-blue-500/50 bg-blue-500/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-500/20 disabled:opacity-50 transition-all"
-                                onClick={() => void handleIntentAction('retry', 'profit', intent.id)}
-                                disabled={!canManageOwnerFlows || intentActionLoadingKey === `retry:profit:${intent.id}`}
-                              >
-                                {intentActionLoadingKey === `retry:profit:${intent.id}` ? 'Retrying...' : 'Retry'}
-                              </button>
+                          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3">
+                            <div className="text-xs text-emerald-400">Confirmed</div>
+                            <div className="mt-1 text-2xl font-bold text-emerald-300">{adminMetrics.intents.totals.confirmed}</div>
+                          </div>
+                          <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3">
+                            <div className="text-xs text-red-400">Failed</div>
+                            <div className="mt-1 text-2xl font-bold text-red-300">{adminMetrics.intents.totals.failed}</div>
+                          </div>
+                        </div>
+                      )}
+                      {ownerHealthAlerts.length > 0 && (
+                        <div className="mt-4 space-y-2">
+                          {ownerHealthAlerts.map((alert, index) => (
+                            <div
+                              key={`${alert.text}-${index}`}
+                              className={
+                                alert.tone === 'danger'
+                                  ? 'rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200'
+                                  : 'rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200'
+                              }
+                            >
+                              {alert.text}
                             </div>
-                          )}
+                          ))}
                         </div>
-                      ))}
+                      )}
                     </div>
                   )}
-                </div>
-
-                {/* Platform Fee Intents */}
-                <div className="rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
-                  <h3 className="mb-4 text-lg font-bold text-white">Platform Fee Intents</h3>
-                  {platformFeeIntents.length === 0 ? (
-                    <p className="text-sm text-slate-400">No platform fee intents yet.</p>
-                  ) : (
-                    <div className="space-y-3">
-                      {visiblePlatformFeeIntents.map((intent) => (
-                        <div key={intent.id} className="rounded-lg border border-white/10 bg-slate-800/30 p-3">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-sm font-medium text-white">
-                              {(intent.platformFeeBps / 100).toFixed(2)}%
-                            </span>
-                            <span className={`text-xs px-2 py-0.5 rounded font-medium ${intentStatusClass(intent.status)}`}>
-                              {intent.status}
-                            </span>
-                          </div>
-                          <div className="mt-2 text-xs font-mono text-slate-400 break-all">
-                            {intent.campaignAddress.slice(0, 12)}...
-                          </div>
-                          {intent.usdcAmountBaseUnits && BigInt(intent.usdcAmountBaseUnits) > 0n && (
-                            <div className="mt-1 text-xs text-slate-300">
-                              Transfer:{' '}
-                              {(Number(intent.usdcAmountBaseUnits) / 1_000_000).toLocaleString(undefined, {
-                                maximumFractionDigits: 6,
-                              })}{' '}
-                              USDC
-                            </div>
-                          )}
-                          {intent.status === 'failed' && (
-                            <div className="mt-2 flex gap-2">
-                              <button
-                                className="rounded border border-blue-500/50 bg-blue-500/10 px-2 py-1 text-xs text-blue-300 hover:bg-blue-500/20 disabled:opacity-50 transition-all"
-                                onClick={() => void handleIntentAction('retry', 'platformFee', intent.id)}
-                                disabled={!canManageOwnerFlows || intentActionLoadingKey === `retry:platformFee:${intent.id}`}
-                              >
-                                {intentActionLoadingKey === `retry:platformFee:${intent.id}` ? 'Retrying...' : 'Retry'}
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* System Health */}
-              {adminMetrics && (
-                <div className="mt-8 rounded-2xl border border-white/10 bg-slate-900/50 p-6 shadow-xl shadow-black/25 backdrop-blur">
-                  <h2 className="mb-4 text-xl font-bold text-white">System Health</h2>
-                  {adminMetrics.intents?.totals && (
-                    <div className="grid gap-3 md:grid-cols-4">
-                      <div className="rounded-lg border border-white/10 bg-slate-800/30 p-3">
-                        <div className="text-xs text-slate-400">Pending</div>
-                        <div className="mt-1 text-2xl font-bold text-white">{adminMetrics.intents.totals.pending}</div>
-                      </div>
-                      <div className="rounded-lg border border-white/10 bg-slate-800/30 p-3">
-                        <div className="text-xs text-slate-400">Submitted</div>
-                        <div className="mt-1 text-2xl font-bold text-white">{adminMetrics.intents.totals.submitted}</div>
-                      </div>
-                      <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3">
-                        <div className="text-xs text-emerald-400">Confirmed</div>
-                        <div className="mt-1 text-2xl font-bold text-emerald-300">{adminMetrics.intents.totals.confirmed}</div>
-                      </div>
-                      <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3">
-                        <div className="text-xs text-red-400">Failed</div>
-                        <div className="mt-1 text-2xl font-bold text-red-300">{adminMetrics.intents.totals.failed}</div>
-                      </div>
-                    </div>
-                  )}
-                  {adminMetrics.settlements && (
-                    <div className="mt-4 grid gap-3 md:grid-cols-2">
-                      <div className="rounded-lg border border-white/10 bg-slate-800/30 p-4">
-                        <div className="text-xs uppercase tracking-wide text-slate-400">Platform Fee Transfers</div>
-                        <div className="mt-2 grid grid-cols-4 gap-2 text-center text-xs">
-                          <div>
-                            <div className="text-slate-400">Pending</div>
-                            <div className="font-semibold text-white">{adminMetrics.settlements.platformFeeTransfers.pending}</div>
-                          </div>
-                          <div>
-                            <div className="text-slate-400">Submitted</div>
-                            <div className="font-semibold text-amber-300">{adminMetrics.settlements.platformFeeTransfers.submitted}</div>
-                          </div>
-                          <div>
-                            <div className="text-slate-400">Confirmed</div>
-                            <div className="font-semibold text-emerald-300">{adminMetrics.settlements.platformFeeTransfers.confirmed}</div>
-                          </div>
-                          <div>
-                            <div className="text-slate-400">Failed</div>
-                            <div className="font-semibold text-red-300">{adminMetrics.settlements.platformFeeTransfers.failed}</div>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-white/10 bg-slate-800/30 p-4">
-                        <div className="text-xs uppercase tracking-wide text-slate-400">Profit Deposits</div>
-                        <div className="mt-2 grid grid-cols-4 gap-2 text-center text-xs">
-                          <div>
-                            <div className="text-slate-400">Pending</div>
-                            <div className="font-semibold text-white">{adminMetrics.settlements.profitDeposits.pending}</div>
-                          </div>
-                          <div>
-                            <div className="text-slate-400">Submitted</div>
-                            <div className="font-semibold text-amber-300">{adminMetrics.settlements.profitDeposits.submitted}</div>
-                          </div>
-                          <div>
-                            <div className="text-slate-400">Confirmed</div>
-                            <div className="font-semibold text-emerald-300">{adminMetrics.settlements.profitDeposits.confirmed}</div>
-                          </div>
-                          <div>
-                            <div className="text-slate-400">Failed</div>
-                            <div className="font-semibold text-red-300">{adminMetrics.settlements.profitDeposits.failed}</div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  {adminMetrics.settlements && (
-                    <div className="mt-4 grid gap-3 md:grid-cols-4">
-                      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
-                        <div className="text-xs text-amber-300">Stale Fee Transfers</div>
-                        <div className="mt-1 text-xl font-bold text-amber-200">
-                          {adminMetrics.settlements.anomalies.feeTransferStaleSubmitted}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
-                        <div className="text-xs text-amber-300">Stale Profit Deposits</div>
-                        <div className="mt-1 text-xl font-bold text-amber-200">
-                          {adminMetrics.settlements.anomalies.profitDepositStaleSubmitted}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3">
-                        <div className="text-xs text-red-300">Orphaned Fee Intents</div>
-                        <div className="mt-1 text-xl font-bold text-red-200">
-                          {adminMetrics.settlements.anomalies.orphanedFeeTransfers}
-                        </div>
-                      </div>
-                      <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3">
-                        <div className="text-xs text-red-300">Settlement Failures (24h)</div>
-                        <div className="mt-1 text-xl font-bold text-red-200">
-                          {adminMetrics.settlements.anomalies.settlementFailures24h}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  {ownerHealthAlerts.length > 0 && (
-                    <div className="mt-4 space-y-2">
-                      {ownerHealthAlerts.map((alert, index) => (
-                        <div
-                          key={`${alert.text}-${index}`}
-                          className={
-                            alert.tone === 'danger'
-                              ? 'rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200'
-                              : 'rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200'
-                          }
-                        >
-                          {alert.text}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                </>
               )}
             </>
           )}

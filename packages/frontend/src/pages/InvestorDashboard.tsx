@@ -36,12 +36,6 @@ const AlertIcon = ({ className }: { className: string }) => (
   </svg>
 );
 
-const Wallet = ({ className }: { className: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-  </svg>
-);
-
 const PROFIT_DISTRIBUTOR_ABI = ['function claim() external'];
 const CROWDFUND_ABI = ['function claimTokens() external'];
 const BASE_SEPOLIA_CHAIN_ID_HEX = '0x14A34';
@@ -156,9 +150,9 @@ export default function InvestorDashboard() {
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [isSigningWithBase, setIsSigningWithBase] = useState(false);
   const [showAllInvestments, setShowAllInvestments] = useState(false);
-  const [showAllPayoutStatuses, setShowAllPayoutStatuses] = useState(false);
   const [showAllEquityClaims, setShowAllEquityClaims] = useState(false);
   const [showAllProfitClaims, setShowAllProfitClaims] = useState(false);
+  const [showNonActionableClaims, setShowNonActionableClaims] = useState(false);
   const [pendingClaims, setPendingClaims] = useState<PendingClaim[]>([]);
   const lastAutoAuthAddressRef = useRef<string | null>(null);
   const hasMatchingConnectedWallet =
@@ -538,27 +532,30 @@ export default function InvestorDashboard() {
       const projectedExit = (invested / target) * baseSell;
       return sum + (projectedExit - invested);
     }, 0);
-    const byChain = investments.reduce<Record<string, number>>((acc, investment) => {
-      const chain = 'Base Sepolia';
-      const amount = Number(investment.usdcAmountBaseUnits) / 1_000_000;
-      acc[chain] = (acc[chain] ?? 0) + amount;
-      return acc;
-    }, {});
+    const totalClaimableProfit = profitStatuses.reduce(
+      (sum, status) => sum + Number(BigInt(status.claimableBaseUnits ?? '0')) / 1_000_000,
+      0
+    );
+    const totalClaimableEquity = profitStatuses.reduce(
+      (sum, status) =>
+        sum + Number(BigInt(status.claimableTokensBaseUnits ?? '0')) / 1_000_000_000_000_000_000,
+      0
+    );
 
-    return { totalInvested, activeProperties, totalReturns, byChain };
-  }, [investments, propertiesById]);
+    return { totalInvested, activeProperties, totalReturns, totalClaimableProfit, totalClaimableEquity };
+  }, [investments, profitStatuses, propertiesById]);
 
   const basescanTxUrl = (txHash: string) => `https://sepolia.basescan.org/tx/${txHash}`;
   const visibleInvestments = showAllInvestments ? investments : investments.slice(0, 3);
-  const visibleProfitStatuses = showAllPayoutStatuses ? profitStatuses : profitStatuses.slice(0, 3);
   const visibleEquityClaims = showAllEquityClaims ? equityClaims : equityClaims.slice(0, 3);
   const visibleProfitClaims = showAllProfitClaims ? profitClaims : profitClaims.slice(0, 3);
   const visiblePendingClaims = pendingClaims.slice(0, 4);
-  const claimCenterItems = useMemo(
-    () =>
-      profitStatuses.filter(
-        (status) => status.diagnostics.profitReady || status.diagnostics.equityReady
-      ),
+  const actionableClaimItems = useMemo(
+    () => profitStatuses.filter((status) => status.diagnostics.profitReady || status.diagnostics.equityReady),
+    [profitStatuses]
+  );
+  const nonActionableClaimItems = useMemo(
+    () => profitStatuses.filter((status) => !status.diagnostics.profitReady && !status.diagnostics.equityReady),
     [profitStatuses]
   );
 
@@ -706,35 +703,33 @@ export default function InvestorDashboard() {
             </div>
           )}
 
-          {/* Summary Cards */}
-          <div className="mb-12 grid gap-4 md:grid-cols-3">
-            <div className="rounded-2xl bg-slate-900/80 backdrop-blur border border-slate-700/50 p-6 hover:border-emerald-500/50 transition">
-              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Total Invested</p>
-              <p className="text-4xl font-bold text-white mb-2">
+          {/* Summary Strip */}
+          <div className="mb-12 grid gap-3 md:grid-cols-4">
+            <div className="rounded-xl border border-white/10 bg-slate-900/75 p-4 backdrop-blur">
+              <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400">Invested</p>
+              <p className="mt-2 text-2xl font-semibold text-white">
                 ${summary.totalInvested.toLocaleString(undefined, { maximumFractionDigits: 0 })}
               </p>
-              <p className="text-xs text-slate-500">{summary.activeProperties} active properties</p>
+              <p className="mt-1 text-xs text-slate-500">{summary.activeProperties} properties</p>
             </div>
-            <div className="rounded-2xl bg-slate-900/80 backdrop-blur border border-slate-700/50 p-6 hover:border-emerald-500/50 transition">
-              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Projected Returns</p>
-              <p className="text-4xl font-bold text-emerald-400">
+            <div className="rounded-xl border border-white/10 bg-slate-900/75 p-4 backdrop-blur">
+              <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400">Claimable Profit</p>
+              <p className="mt-2 text-2xl font-semibold text-emerald-300">
+                ${summary.totalClaimableProfit.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              </p>
+            </div>
+            <div className="rounded-xl border border-white/10 bg-slate-900/75 p-4 backdrop-blur">
+              <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400">Claimable Equity</p>
+              <p className="mt-2 text-2xl font-semibold text-blue-300">
+                {summary.totalClaimableEquity.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+              </p>
+            </div>
+            <div className="rounded-xl border border-white/10 bg-slate-900/75 p-4 backdrop-blur">
+              <p className="text-[11px] uppercase tracking-[0.2em] text-slate-400">Projected Return</p>
+              <p className="mt-2 text-2xl font-semibold text-white">
                 ${summary.totalReturns.toLocaleString(undefined, { maximumFractionDigits: 0 })}
               </p>
-              <p className="text-xs text-slate-500">Base scenario</p>
-            </div>
-            <div className="rounded-2xl bg-slate-900/80 backdrop-blur border border-slate-700/50 p-6 hover:border-emerald-500/50 transition">
-              <div className="flex items-center gap-2 mb-2">
-                <Wallet className="w-4 h-4 text-blue-400" />
-                <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Chain Distribution</p>
-              </div>
-              <div className="space-y-2 text-sm">
-                {Object.entries(summary.byChain).map(([chain, amount]) => (
-                  <div key={chain} className="flex justify-between items-center">
-                    <span className="text-slate-300">{chain}</span>
-                    <span className="text-white font-semibold">${amount.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
-                  </div>
-                ))}
-              </div>
+              <p className="mt-1 text-xs text-slate-500">Base scenario</p>
             </div>
           </div>
 
@@ -824,22 +819,22 @@ export default function InvestorDashboard() {
             )}
           </div>
 
-          {/* Payout Status */}
+          {/* Claim Queue */}
           <div className="mb-8 rounded-2xl bg-slate-900/80 backdrop-blur border border-slate-700/50 p-8">
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-2xl font-semibold text-white">Claim Center</h2>
               <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                Actionable claims only
+                Priority queue
               </p>
             </div>
 
             {!canFetchInvestorData ? (
               <p className="text-slate-400">Authenticate to view claim opportunities.</p>
-            ) : claimCenterItems.length === 0 ? (
+            ) : actionableClaimItems.length === 0 && nonActionableClaimItems.length === 0 ? (
               <p className="text-slate-400">No claimable profit or equity yet.</p>
             ) : (
               <div className="space-y-3">
-                {claimCenterItems.map((status) => {
+                {actionableClaimItems.map((status) => {
                   const claimableProfit = Number(BigInt(status.claimableBaseUnits ?? '0')) / 1_000_000;
                   const claimableEquity =
                     Number(BigInt(status.claimableTokensBaseUnits ?? '0')) / 1_000_000_000_000_000_000;
@@ -853,7 +848,7 @@ export default function InvestorDashboard() {
                       key={`claim-center:${status.propertyId}:${status.profitDistributorAddress}`}
                       className="rounded-lg bg-slate-800/40 border border-slate-700/50 p-4"
                     >
-                      <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-start justify-between gap-3 mb-3">
                         <div>
                           <p className="text-sm font-semibold text-white">{status.propertyId}</p>
                           <p className="text-xs text-slate-400 mt-1">
@@ -871,7 +866,23 @@ export default function InvestorDashboard() {
                           View <ExternalLink className="w-3 h-3" />
                         </Link>
                       </div>
-                      <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+
+                      <div className="grid grid-cols-2 gap-3 mb-3 text-xs">
+                        <div className="rounded border border-white/10 bg-slate-900/40 px-3 py-2">
+                          <span className="text-slate-400">Claimable Profit</span>
+                          <p className="mt-1 font-semibold text-emerald-300">
+                            ${claimableProfit.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                          </p>
+                        </div>
+                        <div className="rounded border border-white/10 bg-slate-900/40 px-3 py-2">
+                          <span className="text-slate-400">Claimable Equity</span>
+                          <p className="mt-1 font-semibold text-blue-300">
+                            {claimableEquity.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto]">
                         <button
                           onClick={() => void handleClaimProfit(status)}
                           disabled={!status.diagnostics.profitReady || isClaimingAny || !canFetchInvestorData}
@@ -891,173 +902,52 @@ export default function InvestorDashboard() {
                             isClaimingAny ||
                             !canFetchInvestorData
                           }
-                          className="w-full py-2.5 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:shadow-lg hover:shadow-blue-500/20 transition disabled:opacity-60 disabled:cursor-not-allowed"
+                          className="w-full md:w-auto px-3 py-2.5 border border-blue-500/50 bg-blue-500/10 text-blue-300 text-sm font-semibold rounded-lg hover:bg-blue-500/20 transition disabled:opacity-60 disabled:cursor-not-allowed"
                         >
-                          {claimingEquityPropertyId === status.propertyId
-                            ? 'Claiming Equity...'
-                            : 'Claim Equity'}
+                          {claimingEquityPropertyId === status.propertyId ? 'Claiming...' : 'Claim Equity'}
                         </button>
                       </div>
                     </div>
                   );
                 })}
-              </div>
-            )}
-          </div>
-
-          {/* Payout Status */}
-          <div className="mb-8 rounded-2xl bg-slate-900/80 backdrop-blur border border-slate-700/50 p-8">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-semibold text-white">Profit Payout Status</h2>
-              {profitStatuses.length > 3 && (
-                <button
-                  onClick={() => setShowAllPayoutStatuses(!showAllPayoutStatuses)}
-                  className="text-xs font-semibold text-slate-400 hover:text-slate-200 transition"
-                >
-                  {showAllPayoutStatuses ? 'Show less' : `View all (${profitStatuses.length})`}
-                </button>
-              )}
-            </div>
-
-            {!canFetchInvestorData ? (
-              <p className="text-slate-400">Authenticate to view payout status.</p>
-            ) : profitStatuses.length === 0 ? (
-              <p className="text-slate-400">No payout status available yet.</p>
-            ) : (
-              <div className="space-y-4">
-                {visibleProfitStatuses.map((status) => {
-                  const claimableBaseUnits = BigInt(status.claimableBaseUnits ?? '0');
-                  const unclaimedPoolBaseUnits = BigInt(status.unclaimedPoolBaseUnits);
-                  const claimableTokensBaseUnits = BigInt(status.claimableTokensBaseUnits ?? '0');
-                  const equityBalanceBaseUnits = BigInt(status.equityWalletBalanceBaseUnits ?? '0');
-                  const claimable = Number(claimableBaseUnits) / 1_000_000;
-                  const unclaimedPool = Number(unclaimedPoolBaseUnits) / 1_000_000;
-                  const claimableTokens = Number(claimableTokensBaseUnits) / 1_000_000_000_000_000_000;
-                  const equityBalance = Number(equityBalanceBaseUnits) / 1_000_000_000_000_000_000;
-                  const canClaim = claimableBaseUnits > 0n;
-                  const shouldClaimEquityFirst =
-                    !canClaim &&
-                    status.diagnostics.equityReady &&
-                    equityBalanceBaseUnits <= 0n &&
-                    claimableTokensBaseUnits > 0n;
-                  return (
-                    <div
-                      key={`${status.propertyId}:${status.profitDistributorAddress}`}
-                      className="rounded-lg bg-slate-800/40 border border-slate-700/50 p-4 hover:border-slate-600 transition"
+                {nonActionableClaimItems.length > 0 && (
+                  <div className="rounded-lg border border-slate-700/60 bg-slate-900/40 p-3">
+                    <button
+                      onClick={() => setShowNonActionableClaims((prev) => !prev)}
+                      className="text-xs font-semibold text-slate-300 hover:text-white"
                     >
-                      <div className="flex items-start justify-between mb-4">
-                        <div>
-                          <p className="text-sm font-semibold text-white">{status.propertyId}</p>
-                          <p className="text-xs text-slate-400 mt-1">
-                            Last deposit: {status.lastDepositAt ? new Date(status.lastDepositAt).toLocaleString() : 'None'}
-                          </p>
-                          <div className="mt-2 flex flex-wrap gap-2 text-[10px]">
-                            <span
-                              className={`rounded px-2 py-0.5 ${
-                                status.diagnostics.profitReady
-                                  ? 'bg-emerald-500/20 text-emerald-300'
-                                  : 'bg-amber-500/20 text-amber-300'
-                              }`}
-                            >
-                              Profit: {status.diagnostics.profitReady ? 'Ready' : 'Not ready'}
-                            </span>
-                            <span
-                              className={`rounded px-2 py-0.5 ${
-                                status.diagnostics.equityReady
-                                  ? 'bg-blue-500/20 text-blue-300'
-                                  : 'bg-slate-700 text-slate-300'
-                              }`}
-                            >
-                              Equity: {status.diagnostics.equityReady ? 'Claimable' : 'Not claimable'}
-                            </span>
-                            {status.campaignState && (
-                              <span className="rounded bg-slate-700 px-2 py-0.5 text-slate-300">
-                                Campaign: {status.campaignState}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <Link
-                          to={`/properties/${status.propertyId}`}
-                          className="text-xs font-semibold text-blue-400 hover:text-blue-300 flex items-center gap-1"
-                        >
-                          View <ExternalLink className="w-3 h-3" />
-                        </Link>
+                      {showNonActionableClaims
+                        ? 'Hide non-claimable items'
+                        : `Show non-claimable items (${nonActionableClaimItems.length})`}
+                    </button>
+                    {showNonActionableClaims && (
+                      <div className="mt-3 space-y-2">
+                        {nonActionableClaimItems.map((status) => (
+                          <details
+                            key={`blocked:${status.propertyId}:${status.profitDistributorAddress}`}
+                            className="rounded border border-slate-700 bg-slate-900/50 p-2 text-xs text-slate-300"
+                          >
+                            <summary className="cursor-pointer select-none font-medium text-slate-200">
+                              {status.propertyId} · Not claimable yet
+                            </summary>
+                            <div className="mt-2 space-y-1">
+                              {status.diagnostics.profitReasons.length > 0 && (
+                                <p className="text-amber-300">
+                                  Profit blockers: {status.diagnostics.profitReasons.map(describeReadinessReason).join('; ')}
+                                </p>
+                              )}
+                              {status.diagnostics.equityReasons.length > 0 && (
+                                <p>
+                                  Equity blockers: {status.diagnostics.equityReasons.map(describeReadinessReason).join('; ')}
+                                </p>
+                              )}
+                            </div>
+                          </details>
+                        ))}
                       </div>
-
-                      <div className="grid grid-cols-2 gap-4 mb-4">
-                        <div>
-                          <p className="text-xs text-slate-400 mb-1">Pool Balance</p>
-                          <p className="text-lg font-semibold text-white">${unclaimedPool.toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-slate-400 mb-1">Your Claimable</p>
-                          <p className="text-lg font-semibold text-emerald-400">${claimable.toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-slate-400 mb-1">Equity Balance</p>
-                          <p className="text-sm font-semibold text-white">
-                            {equityBalance.toLocaleString(undefined, { maximumFractionDigits: 4 })}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-slate-400 mb-1">Claimable Equity</p>
-                          <p className="text-sm font-semibold text-blue-300">
-                            {claimableTokens.toLocaleString(undefined, { maximumFractionDigits: 4 })}
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-                        <button
-                          onClick={() => void handleClaimProfit(status)}
-                          disabled={!canClaim || isClaimingAny || !canFetchInvestorData}
-                          className="w-full py-3 bg-emerald-600 text-white font-semibold rounded-lg hover:shadow-lg hover:shadow-emerald-500/20 transition disabled:opacity-60 disabled:cursor-not-allowed"
-                        >
-                          {claimingProfitPropertyId === status.propertyId
-                            ? 'Claiming Profit...'
-                            : shouldClaimEquityFirst
-                              ? 'Claim Equity First'
-                              : canClaim
-                              ? 'Claim Profit'
-                              : 'No claimable profit'}
-                        </button>
-                        <button
-                          onClick={() => void handleClaimEquity(status)}
-                          disabled={
-                            !status.diagnostics.equityReady ||
-                            !status.campaignAddress ||
-                            isClaimingAny ||
-                            !canFetchInvestorData
-                          }
-                          className="w-full py-3 bg-blue-600 text-white font-semibold rounded-lg hover:shadow-lg hover:shadow-blue-500/20 transition disabled:opacity-60 disabled:cursor-not-allowed"
-                        >
-                          {claimingEquityPropertyId === status.propertyId
-                            ? 'Claiming Equity...'
-                            : status.diagnostics.equityReady
-                              ? 'Claim Equity'
-                              : 'No claimable equity'}
-                        </button>
-                      </div>
-
-                      {(status.diagnostics.profitReasons.length > 0 ||
-                        status.diagnostics.equityReasons.length > 0) && (
-                        <div className="mt-3 rounded border border-slate-700 bg-slate-900/60 p-3 text-xs">
-                          {status.diagnostics.profitReasons.length > 0 && (
-                            <p className="text-amber-300">
-                              Profit blockers: {status.diagnostics.profitReasons.map(describeReadinessReason).join('; ')}
-                            </p>
-                          )}
-                          {status.diagnostics.equityReasons.length > 0 && (
-                            <p className="mt-1 text-slate-300">
-                              Equity blockers: {status.diagnostics.equityReasons.map(describeReadinessReason).join('; ')}
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>

@@ -30,6 +30,8 @@ type PropertyRow = {
   imageUrl: string | null;
   imageUrls: string[];
   youtubeEmbedUrl: string | null;
+  latitude: number | null;
+  longitude: number | null;
   crowdfundAddress: string;
   equityTokenAddress: string;
   profitDistributorAddress: string;
@@ -103,6 +105,8 @@ export const listProperties = async (req: Request, res: Response) => {
           '[]'::json
         ) AS "imageUrls",
         youtube_embed_url AS "youtubeEmbedUrl",
+        latitude::double precision AS "latitude",
+        longitude::double precision AS "longitude",
         LOWER(crowdfund_contract_address) AS "crowdfundAddress",
         LOWER(equity_token_address) AS "equityTokenAddress",
         LOWER(profit_distributor_address) AS "profitDistributorAddress",
@@ -167,6 +171,8 @@ export const getProperty = async (req: Request, res: Response) => {
           '[]'::json
         ) AS "imageUrls",
         youtube_embed_url AS "youtubeEmbedUrl",
+        latitude::double precision AS "latitude",
+        longitude::double precision AS "longitude",
         LOWER(crowdfund_contract_address) AS "crowdfundAddress",
         LOWER(equity_token_address) AS "equityTokenAddress",
         LOWER(profit_distributor_address) AS "profitDistributorAddress",
@@ -318,6 +324,26 @@ const normalizeYoutubeEmbedUrl = (value: unknown): string | null => {
   return `https://www.youtube.com/embed/${videoId}`;
 };
 
+const parseOptionalCoordinate = (
+  value: unknown,
+  field: 'latitude' | 'longitude'
+): number | null => {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new ValidationError(`Invalid ${field}`);
+  }
+  if (field === 'latitude' && (parsed < -90 || parsed > 90)) {
+    throw new ValidationError('latitude must be between -90 and 90');
+  }
+  if (field === 'longitude' && (parsed < -180 || parsed > 180)) {
+    throw new ValidationError('longitude must be between -180 and 180');
+  }
+  return Number(parsed.toFixed(6));
+};
+
 const selectPropertyById = async (propertyId: string): Promise<PropertyRow | null> => {
   const rows: PropertyRow[] = await sequelize.query<PropertyRow>(
     `
@@ -337,6 +363,8 @@ const selectPropertyById = async (propertyId: string): Promise<PropertyRow | nul
         '[]'::json
       ) AS "imageUrls",
       youtube_embed_url AS "youtubeEmbedUrl",
+      latitude::double precision AS "latitude",
+      longitude::double precision AS "longitude",
       LOWER(crowdfund_contract_address) AS "crowdfundAddress",
       LOWER(equity_token_address) AS "equityTokenAddress",
       LOWER(profit_distributor_address) AS "profitDistributorAddress",
@@ -387,6 +415,8 @@ export const listAdminProperties = async (req: AuthenticatedRequest, res: Respon
           '[]'::json
         ) AS "imageUrls",
         youtube_embed_url AS "youtubeEmbedUrl",
+        latitude::double precision AS "latitude",
+        longitude::double precision AS "longitude",
         LOWER(crowdfund_contract_address) AS "crowdfundAddress",
         LOWER(equity_token_address) AS "equityTokenAddress",
         LOWER(profit_distributor_address) AS "profitDistributorAddress",
@@ -426,6 +456,8 @@ export const updateAdminProperty = async (req: AuthenticatedRequest, res: Respon
     const hasImageUrl = Object.prototype.hasOwnProperty.call(req.body, 'imageUrl');
     const hasImageUrls = Object.prototype.hasOwnProperty.call(req.body, 'imageUrls');
     const hasYoutubeEmbedUrl = Object.prototype.hasOwnProperty.call(req.body, 'youtubeEmbedUrl');
+    const hasLatitude = Object.prototype.hasOwnProperty.call(req.body, 'latitude');
+    const hasLongitude = Object.prototype.hasOwnProperty.call(req.body, 'longitude');
     const hasEstimatedSellUsdcBaseUnits = Object.prototype.hasOwnProperty.call(
       req.body,
       'estimatedSellUsdcBaseUnits'
@@ -459,6 +491,8 @@ export const updateAdminProperty = async (req: AuthenticatedRequest, res: Respon
       !hasImageUrl &&
       !hasImageUrls &&
       !hasYoutubeEmbedUrl &&
+      !hasLatitude &&
+      !hasLongitude &&
       !hasEstimatedSellUsdcBaseUnits &&
       !hasConservativeSellUsdcBaseUnits &&
       !hasBaseSellUsdcBaseUnits &&
@@ -468,7 +502,7 @@ export const updateAdminProperty = async (req: AuthenticatedRequest, res: Respon
       !hasOptimisticMultiplierBps
     ) {
       throw new ValidationError(
-        'Provide at least one field to update: name, location, description, imageUrl, imageUrls, youtubeEmbedUrl, estimatedSellUsdcBaseUnits, conservative/base/optimistic scenario values'
+        'Provide at least one field to update: name, location, description, imageUrl, imageUrls, youtubeEmbedUrl, latitude, longitude, estimatedSellUsdcBaseUnits, conservative/base/optimistic scenario values'
       );
     }
 
@@ -506,6 +540,16 @@ export const updateAdminProperty = async (req: AuthenticatedRequest, res: Respon
       const value = normalizeYoutubeEmbedUrl(req.body.youtubeEmbedUrl);
       updates.push('youtube_embed_url = :youtubeEmbedUrl');
       replacements.youtubeEmbedUrl = value;
+    }
+    if (hasLatitude) {
+      const value = parseOptionalCoordinate(req.body.latitude, 'latitude');
+      updates.push('latitude = :latitude');
+      replacements.latitude = value;
+    }
+    if (hasLongitude) {
+      const value = parseOptionalCoordinate(req.body.longitude, 'longitude');
+      updates.push('longitude = :longitude');
+      replacements.longitude = value;
     }
     if (hasEstimatedSellUsdcBaseUnits) {
       const value = parseOptionalBaseUnits(

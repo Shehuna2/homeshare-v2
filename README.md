@@ -77,6 +77,8 @@ pnpm dev
 - [Execution Board](./docs/EXECUTION_BOARD.md)
 - [Setup Guide](./docs/SETUP.md)
 - [Deployment](./docs/DEPLOYMENT.md)
+- [MVP Go-Live Checklist](./docs/MVP_GO_LIVE_CHECKLIST.md)
+- [Launch-Day Runbook](./docs/LAUNCH_DAY_RUNBOOK.md)
 - [CI/CD Guide](./docs/CI_CD.md)
 - [Observability Guide](./docs/OBSERVABILITY.md)
 - [Intent Operations](./docs/OPERATIONS_INTENTS.md)

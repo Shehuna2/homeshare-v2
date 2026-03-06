@@ -201,6 +201,26 @@ const normalizeYoutubeEmbedUrl = (value: unknown): string | null => {
   return `https://www.youtube.com/embed/${videoId}`;
 };
 
+const parseOptionalCoordinate = (
+  value: unknown,
+  field: 'latitude' | 'longitude'
+): number | null => {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new ValidationError(`Invalid ${field}`);
+  }
+  if (field === 'latitude' && (parsed < -90 || parsed > 90)) {
+    throw new ValidationError('latitude must be between -90 and 90');
+  }
+  if (field === 'longitude' && (parsed < -180 || parsed > 180)) {
+    throw new ValidationError('longitude must be between -180 and 180');
+  }
+  return Number(parsed.toFixed(6));
+};
+
 const profitReadInterface = new Interface([
   'function owner() view returns (address)',
   'function usdcToken() view returns (address)',
@@ -426,6 +446,8 @@ export const createPropertyIntent = async (req: AuthenticatedRequest, res: Respo
     const imageUrl = parseOptionalHttpUrl(req.body.imageUrl, 'imageUrl');
     const imageUrls = parseOptionalImageUrls(req.body.imageUrls);
     const youtubeEmbedUrl = normalizeYoutubeEmbedUrl(req.body.youtubeEmbedUrl);
+    const latitude = parseOptionalCoordinate(req.body.latitude, 'latitude');
+    const longitude = parseOptionalCoordinate(req.body.longitude, 'longitude');
     const targetUsdcBaseUnits = parseBaseUnits(req.body.targetUsdcBaseUnits, 'targetUsdcBaseUnits');
     const estimatedSellUsdcBaseUnits = parseOptionalBaseUnits(
       req.body.estimatedSellUsdcBaseUnits,
@@ -494,6 +516,8 @@ export const createPropertyIntent = async (req: AuthenticatedRequest, res: Respo
         image_url,
         gallery_image_urls,
         youtube_embed_url,
+        latitude,
+        longitude,
         target_usdc_base_units,
         estimated_sell_usdc_base_units,
         conservative_sell_usdc_base_units,
@@ -517,6 +541,8 @@ export const createPropertyIntent = async (req: AuthenticatedRequest, res: Respo
         :imageUrl,
         :galleryImageUrls,
         :youtubeEmbedUrl,
+        :latitude,
+        :longitude,
         :targetUsdcBaseUnits,
         :estimatedSellUsdcBaseUnits,
         :conservativeSellUsdcBaseUnits,
@@ -538,6 +564,8 @@ export const createPropertyIntent = async (req: AuthenticatedRequest, res: Respo
         image_url AS "imageUrl",
         gallery_image_urls AS "imageUrls",
         youtube_embed_url AS "youtubeEmbedUrl",
+        latitude::double precision AS "latitude",
+        longitude::double precision AS "longitude",
         target_usdc_base_units::text AS "targetUsdcBaseUnits",
         estimated_sell_usdc_base_units::text AS "estimatedSellUsdcBaseUnits",
         conservative_sell_usdc_base_units::text AS "conservativeSellUsdcBaseUnits",
@@ -568,6 +596,8 @@ export const createPropertyIntent = async (req: AuthenticatedRequest, res: Respo
           imageUrl,
           galleryImageUrls: JSON.stringify(mergedGallery),
           youtubeEmbedUrl,
+          latitude,
+          longitude,
           targetUsdcBaseUnits,
           estimatedSellUsdcBaseUnits,
           conservativeSellUsdcBaseUnits,
@@ -1004,6 +1034,8 @@ export const listPropertyIntents = async (req: AuthenticatedRequest, res: Respon
         image_url AS "imageUrl",
         gallery_image_urls AS "imageUrls",
         youtube_embed_url AS "youtubeEmbedUrl",
+        latitude::double precision AS "latitude",
+        longitude::double precision AS "longitude",
         target_usdc_base_units::text AS "targetUsdcBaseUnits",
         estimated_sell_usdc_base_units::text AS "estimatedSellUsdcBaseUnits",
         conservative_sell_usdc_base_units::text AS "conservativeSellUsdcBaseUnits",

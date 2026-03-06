@@ -30,6 +30,8 @@ export interface PropertyIntentPayload {
   imageUrl?: string;
   imageUrls?: string[];
   youtubeEmbedUrl?: string;
+  latitude?: number | null;
+  longitude?: number | null;
   targetUsdcBaseUnits: string;
   estimatedSellUsdcBaseUnits?: string | null;
   conservativeSellUsdcBaseUnits?: string | null;
@@ -91,6 +93,8 @@ export interface PropertyIntentResponse {
   imageUrl: string | null;
   imageUrls: string[];
   youtubeEmbedUrl: string | null;
+  latitude: number | null;
+  longitude: number | null;
   targetUsdcBaseUnits: string;
   estimatedSellUsdcBaseUnits: string | null;
   conservativeSellUsdcBaseUnits: string | null;
@@ -153,6 +157,8 @@ export interface PropertyResponse {
   imageUrl: string | null;
   imageUrls: string[];
   youtubeEmbedUrl: string | null;
+  latitude: number | null;
+  longitude: number | null;
   crowdfundAddress: string;
   equityTokenAddress: string;
   profitDistributorAddress: string;
@@ -591,6 +597,8 @@ export async function createPropertyIntent(payload: PropertyIntentPayload, token
       imageUrl: payload.imageUrl ?? null,
       imageUrls: payload.imageUrls ?? [],
       youtubeEmbedUrl: payload.youtubeEmbedUrl ?? null,
+      latitude: payload.latitude ?? null,
+      longitude: payload.longitude ?? null,
       targetUsdcBaseUnits: payload.targetUsdcBaseUnits,
       estimatedSellUsdcBaseUnits: payload.estimatedSellUsdcBaseUnits ?? null,
       conservativeSellUsdcBaseUnits: payload.conservativeSellUsdcBaseUnits ?? null,
@@ -1073,6 +1081,8 @@ export async function updateAdminProperty(
     imageUrl?: string | null;
     imageUrls?: string[] | null;
     youtubeEmbedUrl?: string | null;
+    latitude?: number | null;
+    longitude?: number | null;
     estimatedSellUsdcBaseUnits?: string | null;
     conservativeSellUsdcBaseUnits?: string | null;
     baseSellUsdcBaseUnits?: string | null;
