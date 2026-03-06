@@ -476,15 +476,31 @@ export interface CampaignLifecyclePreflightResponse {
     indexerLastBlock: number;
     staleSubmittedIntents: number;
   };
+  postSettlementHealth: {
+    equityTokenSet: boolean;
+    onchainEquityTokenAddress: string;
+    mappedEquityTokenAddress: string | null;
+    profitDistributorAddress: string | null;
+    investorWallets: number;
+    equityClaimableWallets: number;
+    profitClaimableWallets: number;
+    claimabilityReadErrors: number;
+  };
 }
 
 export interface CampaignLifecycleActionResponse {
   campaignAddress: string;
   chainId: number;
-  txHash: string;
+  txHash: string | null;
   operatorAddress: string;
   nextState: string;
   recipient?: string;
+}
+
+export interface CampaignSetupRepairResponse extends CampaignLifecycleActionResponse {
+  repaired: boolean;
+  equityTokenAddress: string;
+  message: string;
 }
 
 export interface ProfitAllowanceApprovalResponse {
@@ -988,6 +1004,30 @@ export async function withdrawCampaignFundsAdmin(
       .json()
       .catch(() => ({ error: 'Failed to withdraw campaign funds' }));
     throw new Error(error.error || 'Failed to withdraw campaign funds');
+  }
+  return response.json();
+}
+
+export async function repairCampaignSetupAdmin(
+  token: string,
+  payload: { campaignAddress: string; chainId?: number }
+): Promise<CampaignSetupRepairResponse> {
+  const response = await fetch(`${API_V1_BASE}/admin/campaigns/repair-setup`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      chainId: payload.chainId ?? 84532,
+      campaignAddress: payload.campaignAddress,
+    }),
+  });
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ error: 'Failed to repair campaign setup' }));
+    throw new Error(error.error || 'Failed to repair campaign setup');
   }
   return response.json();
 }

@@ -41,8 +41,9 @@ const crowdfundReadInterface = new Interface([
   'function targetAmountUSDC() view returns (uint256)',
   'function raisedAmountUSDC() view returns (uint256)',
   'function endTime() view returns (uint256)',
+  'function equityToken() view returns (address)',
 ]);
-const crowdfundWriteAbi = ['function finalizeCampaign()'];
+const crowdfundWriteAbi = ['function finalizeCampaign()', 'function setEquityToken(address equityTokenAddress)'];
 
 const decodeState = (stateIndex) => {
   if (stateIndex === 1) return 'SUCCESS';
@@ -92,6 +93,27 @@ const loadEligibleCampaigns = async () =>
         OR (end_time IS NOT NULL AND end_time <= NOW())
       )
     ORDER BY updated_at ASC
+    LIMIT :limit
+    `,
+    {
+      type: QueryTypes.SELECT,
+      replacements: { limit: batchSize },
+    }
+  );
+
+const loadEquitySetupCandidates = async () =>
+  sequelize.query(
+    `
+    SELECT
+      LOWER(c.contract_address) AS "campaignAddress",
+      LOWER(p.equity_token_address) AS "equityTokenAddress",
+      c.state
+    FROM campaigns c
+    JOIN properties p ON p.id = c.property_id
+    WHERE c.state IN ('SUCCESS', 'WITHDRAWN')
+      AND p.equity_token_address IS NOT NULL
+      AND p.equity_token_address <> ''
+    ORDER BY c.updated_at ASC
     LIMIT :limit
     `,
     {
@@ -166,6 +188,41 @@ const shouldFinalizeNow = async (campaignAddress) => {
   };
 };
 
+const shouldSetEquityTokenNow = async (campaignAddress) => {
+  const [ownerRaw, stateRaw, equityRaw] = await Promise.all([
+    provider.call({
+      to: campaignAddress,
+      data: crowdfundReadInterface.encodeFunctionData('owner', []),
+    }),
+    provider.call({
+      to: campaignAddress,
+      data: crowdfundReadInterface.encodeFunctionData('state', []),
+    }),
+    provider.call({
+      to: campaignAddress,
+      data: crowdfundReadInterface.encodeFunctionData('equityToken', []),
+    }),
+  ]);
+
+  const [ownerAddress] = crowdfundReadInterface.decodeFunctionResult('owner', ownerRaw);
+  const [stateIndexRaw] = crowdfundReadInterface.decodeFunctionResult('state', stateRaw);
+  const [equityAddressRaw] = crowdfundReadInterface.decodeFunctionResult('equityToken', equityRaw);
+
+  const owner = String(ownerAddress).toLowerCase();
+  const state = decodeState(Number(stateIndexRaw));
+  const equityToken = String(equityAddressRaw).toLowerCase();
+  const zeroAddress = '0x0000000000000000000000000000000000000000';
+  const isClaimPhase = state === 'SUCCESS' || state === 'WITHDRAWN';
+  const needsSetup = equityToken === zeroAddress;
+
+  return {
+    owner,
+    state,
+    equityToken,
+    canSet: isClaimPhase && needsSetup,
+  };
+};
+
 const processCycle = async () => {
   const locked = await acquireWorkerLock();
   if (!locked) {
@@ -213,6 +270,38 @@ const processCycle = async () => {
         );
       } catch (error) {
         console.error(`failed finalize campaign=${campaignAddress}: ${compactErrorMessage(error)}`);
+      }
+    }
+
+    const equityCandidates = await loadEquitySetupCandidates();
+    for (const campaign of equityCandidates) {
+      const campaignAddress = campaign.campaignAddress.toLowerCase();
+      const equityTokenAddress = campaign.equityTokenAddress.toLowerCase();
+      try {
+        const snapshot = await shouldSetEquityTokenNow(campaignAddress);
+        if (snapshot.owner !== operatorAddress) {
+          console.log(
+            `skip setEquityToken campaign=${campaignAddress}: owner ${snapshot.owner} != operator ${operatorAddress}`
+          );
+          continue;
+        }
+        if (!snapshot.canSet) {
+          continue;
+        }
+
+        const crowdfund = new Contract(campaignAddress, crowdfundWriteAbi, signer);
+        const tx = await sendWithNonceRetry(() => crowdfund.setEquityToken(equityTokenAddress));
+        const receipt = await tx.wait();
+        if (!receipt || receipt.status !== 1) {
+          throw new Error('setEquityToken transaction reverted');
+        }
+        console.log(
+          `setEquityToken campaign=${campaignAddress} equityToken=${equityTokenAddress} tx=${tx.hash}`
+        );
+      } catch (error) {
+        console.error(
+          `failed setEquityToken campaign=${campaignAddress}: ${compactErrorMessage(error)}`
+        );
       }
     }
   } finally {

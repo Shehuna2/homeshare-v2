@@ -843,6 +843,11 @@ export default function InvestorDashboard() {
                   const claimableProfit = Number(BigInt(status.claimableBaseUnits ?? '0')) / 1_000_000;
                   const claimableEquity =
                     Number(BigInt(status.claimableTokensBaseUnits ?? '0')) / 1_000_000_000_000_000_000;
+                  const shouldClaimEquityFirst =
+                    !status.diagnostics.profitReady &&
+                    status.diagnostics.equityReady &&
+                    BigInt(status.equityWalletBalanceBaseUnits ?? '0') <= 0n &&
+                    BigInt(status.claimableTokensBaseUnits ?? '0') > 0n;
                   return (
                     <div
                       key={`claim-center:${status.propertyId}:${status.profitDistributorAddress}`}
@@ -874,7 +879,9 @@ export default function InvestorDashboard() {
                         >
                           {claimingProfitPropertyId === status.propertyId
                             ? 'Claiming Profit...'
-                            : 'Claim Profit'}
+                            : shouldClaimEquityFirst
+                              ? 'Claim Equity First'
+                              : 'Claim Profit'}
                         </button>
                         <button
                           onClick={() => void handleClaimEquity(status)}
@@ -928,6 +935,11 @@ export default function InvestorDashboard() {
                   const claimableTokens = Number(claimableTokensBaseUnits) / 1_000_000_000_000_000_000;
                   const equityBalance = Number(equityBalanceBaseUnits) / 1_000_000_000_000_000_000;
                   const canClaim = claimableBaseUnits > 0n;
+                  const shouldClaimEquityFirst =
+                    !canClaim &&
+                    status.diagnostics.equityReady &&
+                    equityBalanceBaseUnits <= 0n &&
+                    claimableTokensBaseUnits > 0n;
                   return (
                     <div
                       key={`${status.propertyId}:${status.profitDistributorAddress}`}
@@ -1004,7 +1016,9 @@ export default function InvestorDashboard() {
                         >
                           {claimingProfitPropertyId === status.propertyId
                             ? 'Claiming Profit...'
-                            : canClaim
+                            : shouldClaimEquityFirst
+                              ? 'Claim Equity First'
+                              : canClaim
                               ? 'Claim Profit'
                               : 'No claimable profit'}
                         </button>

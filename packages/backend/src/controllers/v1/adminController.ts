@@ -204,6 +204,7 @@ const normalizeYoutubeEmbedUrl = (value: unknown): string | null => {
 const profitReadInterface = new Interface([
   'function owner() view returns (address)',
   'function usdcToken() view returns (address)',
+  'function claimable(address user) view returns (uint256)',
 ]);
 const crowdfundReadInterface = new Interface([
   'function owner() view returns (address)',
@@ -213,12 +214,15 @@ const crowdfundReadInterface = new Interface([
   'function startTime() view returns (uint256)',
   'function endTime() view returns (uint256)',
   'function usdcToken() view returns (address)',
+  'function equityToken() view returns (address)',
+  'function claimableTokens(address investor) view returns (uint256)',
   'function platformFeeBps() view returns (uint16)',
   'function platformFeeRecipient() view returns (address)',
 ]);
 const crowdfundWriteAbi = [
   'function finalizeCampaign()',
   'function withdrawFunds(address to)',
+  'function setEquityToken(address equityTokenAddress)',
 ];
 
 const erc20ReadInterface = new Interface([
@@ -324,10 +328,11 @@ const resolveCampaignAddressForProperty = async (
   const rows = await sequelize.query<{ campaignAddress: string }>(
     `
     SELECT LOWER(contract_address) AS "campaignAddress"
-    FROM campaigns
-    WHERE chain_id = :chainId
-      AND property_id = :propertyId
-    ORDER BY updated_at DESC, created_at DESC
+    FROM campaigns c
+    JOIN properties p ON p.id = c.property_id
+    WHERE c.chain_id = :chainId
+      AND p.property_id = :propertyId
+    ORDER BY c.updated_at DESC, c.created_at DESC
     LIMIT 1
     `,
     {
@@ -342,6 +347,28 @@ const resolveCampaignAddressForProperty = async (
     );
   }
   return campaignAddress;
+};
+
+const resolveEquityTokenForCampaign = async (
+  chainId: number,
+  campaignAddress: string
+): Promise<string | null> => {
+  const rows = await sequelize.query<{ equityTokenAddress: string | null }>(
+    `
+    SELECT LOWER(p.equity_token_address) AS "equityTokenAddress"
+    FROM campaigns c
+    JOIN properties p ON p.id = c.property_id
+    WHERE c.chain_id = :chainId
+      AND LOWER(c.contract_address) = :campaignAddress
+    ORDER BY c.updated_at DESC, c.created_at DESC
+    LIMIT 1
+    `,
+    {
+      type: QueryTypes.SELECT,
+      replacements: { chainId, campaignAddress: campaignAddress.toLowerCase() },
+    }
+  );
+  return rows[0]?.equityTokenAddress ?? null;
 };
 
 const assertSettlementIntentEligibility = async (
@@ -1802,7 +1829,8 @@ export const getCampaignLifecyclePreflight = async (req: AuthenticatedRequest, r
     const provider = new JsonRpcProvider(rpcUrl);
     const operatorAddress = getPlatformOperatorAddress();
 
-    const [ownerRaw, stateRaw, targetRaw, raisedRaw, startRaw, endRaw, usdcRaw] = await Promise.all([
+    const [ownerRaw, stateRaw, targetRaw, raisedRaw, startRaw, endRaw, usdcRaw, equityRaw] =
+      await Promise.all([
       provider.call({
         to: campaignAddress,
         data: crowdfundReadInterface.encodeFunctionData('owner', []),
@@ -1831,6 +1859,10 @@ export const getCampaignLifecyclePreflight = async (req: AuthenticatedRequest, r
         to: campaignAddress,
         data: crowdfundReadInterface.encodeFunctionData('usdcToken', []),
       }),
+      provider.call({
+        to: campaignAddress,
+        data: crowdfundReadInterface.encodeFunctionData('equityToken', []),
+      }),
     ]);
 
     const [ownerAddress] = crowdfundReadInterface.decodeFunctionResult('owner', ownerRaw);
@@ -1840,9 +1872,11 @@ export const getCampaignLifecyclePreflight = async (req: AuthenticatedRequest, r
     const [startTimeRaw] = crowdfundReadInterface.decodeFunctionResult('startTime', startRaw);
     const [endTimeRaw] = crowdfundReadInterface.decodeFunctionResult('endTime', endRaw);
     const [usdcAddressRaw] = crowdfundReadInterface.decodeFunctionResult('usdcToken', usdcRaw);
+    const [equityAddressRaw] = crowdfundReadInterface.decodeFunctionResult('equityToken', equityRaw);
 
     const normalizedOwner = String(ownerAddress).toLowerCase();
     const normalizedUsdcAddress = String(usdcAddressRaw).toLowerCase();
+    const onchainEquityTokenAddress = String(equityAddressRaw).toLowerCase();
     const stateIndex = Number(stateIndexRaw);
     const state = decodeCrowdfundState(stateIndex);
     const targetAmount = BigInt(targetAmountRaw);
@@ -1858,6 +1892,81 @@ export const getCampaignLifecyclePreflight = async (req: AuthenticatedRequest, r
     const erc20BalanceRaw = await provider.call({ to: normalizedUsdcAddress, data: erc20BalanceData });
     const [campaignBalanceRaw] = erc20ReadInterface.decodeFunctionResult('balanceOf', erc20BalanceRaw);
     const campaignUsdcBalance = BigInt(campaignBalanceRaw);
+
+    const propertyRows = await sequelize.query<{
+      equityTokenAddress: string | null;
+      profitDistributorAddress: string | null;
+    }>(
+      `
+      SELECT
+        LOWER(p.equity_token_address) AS "equityTokenAddress",
+        LOWER(p.profit_distributor_address) AS "profitDistributorAddress"
+      FROM campaigns c
+      JOIN properties p ON p.id = c.property_id
+      WHERE c.chain_id = :chainId
+        AND LOWER(c.contract_address) = :campaignAddress
+      ORDER BY c.updated_at DESC, c.created_at DESC
+      LIMIT 1
+      `,
+      {
+        type: QueryTypes.SELECT,
+        replacements: { chainId: BASE_SEPOLIA_CHAIN_ID, campaignAddress: campaignAddress.toLowerCase() },
+      }
+    );
+    const mappedEquityTokenAddress = propertyRows[0]?.equityTokenAddress ?? null;
+    const mappedProfitDistributorAddress = propertyRows[0]?.profitDistributorAddress ?? null;
+
+    let investorWallets = 0;
+    let equityClaimableWallets = 0;
+    let profitClaimableWallets = 0;
+    let claimabilityReadErrors = 0;
+    if ((state === 'SUCCESS' || state === 'WITHDRAWN') && mappedProfitDistributorAddress) {
+      const investorRows = await sequelize.query<{ investorAddress: string }>(
+        `
+        SELECT LOWER(ci.investor_address) AS "investorAddress"
+        FROM campaign_investments ci
+        JOIN campaigns c ON c.id = ci.campaign_id
+        WHERE ci.chain_id = :chainId
+          AND LOWER(c.contract_address) = :campaignAddress
+        GROUP BY LOWER(ci.investor_address)
+        ORDER BY LOWER(ci.investor_address)
+        `,
+        {
+          type: QueryTypes.SELECT,
+          replacements: { chainId: BASE_SEPOLIA_CHAIN_ID, campaignAddress: campaignAddress.toLowerCase() },
+        }
+      );
+      investorWallets = investorRows.length;
+      for (const investor of investorRows) {
+        try {
+          const equityCall = await provider.call({
+            to: campaignAddress,
+            data: crowdfundReadInterface.encodeFunctionData('claimableTokens', [investor.investorAddress]),
+          });
+          const [equityClaimableRaw] = crowdfundReadInterface.decodeFunctionResult(
+            'claimableTokens',
+            equityCall
+          );
+          if (BigInt(equityClaimableRaw) > 0n) {
+            equityClaimableWallets += 1;
+          }
+        } catch {
+          claimabilityReadErrors += 1;
+        }
+        try {
+          const profitCall = await provider.call({
+            to: mappedProfitDistributorAddress,
+            data: profitReadInterface.encodeFunctionData('claimable', [investor.investorAddress]),
+          });
+          const [profitClaimableRaw] = profitReadInterface.decodeFunctionResult('claimable', profitCall);
+          if (BigInt(profitClaimableRaw) > 0n) {
+            profitClaimableWallets += 1;
+          }
+        } catch {
+          claimabilityReadErrors += 1;
+        }
+      }
+    }
 
     const ownerMatchesOperator = operatorAddress !== null && normalizedOwner === operatorAddress;
     const canFinalizeNow = state === 'ACTIVE' && (isTargetReached || isEnded);
@@ -1943,6 +2052,17 @@ export const getCampaignLifecyclePreflight = async (req: AuthenticatedRequest, r
       observability: {
         indexerLastBlock,
         staleSubmittedIntents,
+      },
+      postSettlementHealth: {
+        equityTokenSet:
+          onchainEquityTokenAddress !== '0x0000000000000000000000000000000000000000',
+        onchainEquityTokenAddress,
+        mappedEquityTokenAddress,
+        profitDistributorAddress: mappedProfitDistributorAddress,
+        investorWallets,
+        equityClaimableWallets,
+        profitClaimableWallets,
+        claimabilityReadErrors,
       },
     });
   } catch (error) {
@@ -2062,6 +2182,106 @@ export const withdrawCampaignFunds = async (req: AuthenticatedRequest, res: Resp
       txHash: tx.hash,
       operatorAddress,
       nextState,
+    });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
+export const repairCampaignSetup = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    requireAdminAddress(req);
+    const chainId = validateChainId(req.body.chainId ?? BASE_SEPOLIA_CHAIN_ID);
+    const campaignAddress = normalizeAddress(req.body.campaignAddress?.toString(), 'campaignAddress');
+
+    const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL || process.env.BASE_MAINNET_RPC_URL || '';
+    if (!rpcUrl) {
+      return sendError(res, 503, 'BASE_SEPOLIA_RPC_URL is not configured', 'service_unavailable');
+    }
+    const operatorPrivateKey = getPlatformOperatorPrivateKey();
+    if (!operatorPrivateKey) {
+      return sendError(res, 503, 'Operator wallet is not configured', 'service_unavailable');
+    }
+
+    const provider = new JsonRpcProvider(rpcUrl);
+    const signer = new Wallet(operatorPrivateKey, provider);
+    const operatorAddress = signer.address.toLowerCase();
+
+    const [ownerRaw, stateRaw, equityRaw] = await Promise.all([
+      provider.call({
+        to: campaignAddress,
+        data: crowdfundReadInterface.encodeFunctionData('owner', []),
+      }),
+      provider.call({
+        to: campaignAddress,
+        data: crowdfundReadInterface.encodeFunctionData('state', []),
+      }),
+      provider.call({
+        to: campaignAddress,
+        data: crowdfundReadInterface.encodeFunctionData('equityToken', []),
+      }),
+    ]);
+
+    const [ownerAddress] = crowdfundReadInterface.decodeFunctionResult('owner', ownerRaw);
+    const [stateIndexRaw] = crowdfundReadInterface.decodeFunctionResult('state', stateRaw);
+    const [equityAddressRaw] = crowdfundReadInterface.decodeFunctionResult('equityToken', equityRaw);
+
+    const normalizedOwner = String(ownerAddress).toLowerCase();
+    if (normalizedOwner !== operatorAddress) {
+      return sendError(res, 409, 'Operator wallet does not own this campaign', 'bad_request');
+    }
+
+    const nextState = decodeCrowdfundState(Number(stateIndexRaw));
+    if (nextState !== 'SUCCESS' && nextState !== 'WITHDRAWN') {
+      return sendError(
+        res,
+        409,
+        `Campaign setup repair is only allowed after success/withdrawn. Current state: ${nextState}`,
+        'bad_request'
+      );
+    }
+
+    const currentEquityToken = String(equityAddressRaw).toLowerCase();
+    const zeroAddress = '0x0000000000000000000000000000000000000000';
+    if (currentEquityToken !== zeroAddress) {
+      return res.json({
+        campaignAddress,
+        chainId,
+        txHash: null,
+        operatorAddress,
+        nextState,
+        repaired: false,
+        equityTokenAddress: currentEquityToken,
+        message: 'Campaign already has an equity token configured.',
+      });
+    }
+
+    const equityTokenAddress = await resolveEquityTokenForCampaign(chainId, campaignAddress);
+    if (!equityTokenAddress) {
+      return sendError(
+        res,
+        404,
+        'No equity token mapped for this campaign in properties table',
+        'not_found'
+      );
+    }
+
+    const crowdfund = new Contract(campaignAddress, crowdfundWriteAbi, signer);
+    const tx = await crowdfund.setEquityToken(equityTokenAddress);
+    const receipt = await tx.wait();
+    if (!receipt || receipt.status !== 1) {
+      return sendError(res, 500, 'setEquityToken transaction reverted', 'internal_error');
+    }
+
+    return res.json({
+      campaignAddress,
+      chainId,
+      txHash: tx.hash,
+      operatorAddress,
+      nextState,
+      repaired: true,
+      equityTokenAddress,
+      message: 'Equity token configured successfully.',
     });
   } catch (error) {
     return handleError(res, error);

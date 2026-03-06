@@ -36,6 +36,7 @@ import {
   getProfitPreflight,
   getPlatformFeeFlowStatus,
   getPlatformFeePreflight,
+  repairCampaignSetup,
   listPlatformFeeIntents,
   listProfitDistributionIntents,
   listPropertyIntents,
@@ -91,6 +92,7 @@ router.get('/admin/platform-fees/intents', auth, requireRole('owner'), listPlatf
 router.get('/admin/campaigns/preflight', auth, requireRole('owner'), getCampaignLifecyclePreflight);
 router.post('/admin/campaigns/finalize', auth, requireRole('owner'), finalizeCampaign);
 router.post('/admin/campaigns/withdraw', auth, requireRole('owner'), withdrawCampaignFunds);
+router.post('/admin/campaigns/repair-setup', auth, requireRole('owner'), repairCampaignSetup);
 router.get('/admin/metrics', auth, requireRole('owner'), getAdminMetrics);
 
 export default router;

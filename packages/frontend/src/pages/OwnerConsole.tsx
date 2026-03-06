@@ -29,6 +29,7 @@ import {
   getAuthNonce,
   loginWithWallet,
   resetAdminIntent,
+  repairCampaignSetupAdmin,
   restoreAdminProperty,
   retryAdminIntent,
   updateAdminProperty,
@@ -93,6 +94,13 @@ type CombinedSubmissionProgress = {
 
 type CombinedRowOutcome = 'completed' | 'in_progress' | 'needs_attention';
 const PROFIT_INTENT_MAX_ATTEMPTS = 3;
+type FullSettlementStepState = 'pending' | 'running' | 'done' | 'error' | 'skipped';
+type FullSettlementStep = {
+  key: 'precheck' | 'finalize' | 'withdraw' | 'repair' | 'submit';
+  label: string;
+  status: FullSettlementStepState;
+  message: string;
+};
 
 const getProfitIntentBlockerMessage = (
   intent: ProfitDistributionIntentResponse | null | undefined
@@ -243,6 +251,13 @@ const buildManualMessage = (address: string, nonce: string, chainId: number): st
     `Issued At: ${new Date().toISOString()}`,
   ].join('\n');
 
+const formatUsdcInput = (amount: number): string =>
+  amount.toLocaleString('en-US', {
+    useGrouping: false,
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 6,
+  });
+
 export default function OwnerConsole() {
   const dispatch = useDispatch();
   const { address, role, token, isAuthenticated } = useSelector((state: RootState) => state.user);
@@ -258,6 +273,18 @@ export default function OwnerConsole() {
   const [smartWithdrawRecipient, setSmartWithdrawRecipient] = useState('');
   const [smartWithdrawStepMessage, setSmartWithdrawStepMessage] = useState('');
   const [isSmartWithdrawRunning, setIsSmartWithdrawRunning] = useState(false);
+  const [showFullSettlementModal, setShowFullSettlementModal] = useState(false);
+  const [fullSettlementCampaign, setFullSettlementCampaign] = useState<CampaignResponse | null>(null);
+  const [fullSettlementRecipient, setFullSettlementRecipient] = useState('');
+  const [fullSettlementGrossUsdc, setFullSettlementGrossUsdc] = useState('');
+  const [fullSettlementGrossSource, setFullSettlementGrossSource] = useState('');
+  const [fullSettlementFeeBps, setFullSettlementFeeBps] = useState('');
+  const [fullSettlementFeeRecipient, setFullSettlementFeeRecipient] = useState('');
+  const [fullSettlementDistributor, setFullSettlementDistributor] = useState('');
+  const [fullSettlementPreflight, setFullSettlementPreflight] =
+    useState<CampaignLifecyclePreflightResponse | null>(null);
+  const [isRunningFullSettlement, setIsRunningFullSettlement] = useState(false);
+  const [fullSettlementSteps, setFullSettlementSteps] = useState<FullSettlementStep[]>([]);
   const [showEditPropertyModal, setShowEditPropertyModal] = useState(false);
   const [showAllCampaignOverview] = useState(false);
   const [showAllCombinedSubmissions] = useState(false);
@@ -373,7 +400,7 @@ export default function OwnerConsole() {
   const [platformFeePreflight, setPlatformFeePreflight] = useState<PlatformFeePreflightResponse | null>(null);
   const [, setPlatformFeeFlowStatus] = useState<PlatformFeeFlowStatusResponse | null>(null);
   const [, setPlatformFeeChecksLoading] = useState(false);
-  const [, setCampaignLifecyclePreflightByAddress] = useState<
+  const [campaignLifecyclePreflightByAddress, setCampaignLifecyclePreflightByAddress] = useState<
     Record<string, CampaignLifecyclePreflightResponse>
   >({});
   const [campaignLifecycleLoadingKey, setCampaignLifecycleLoadingKey] = useState<string | null>(null);
@@ -961,49 +988,81 @@ export default function OwnerConsole() {
     };
   };
 
-  const handleCreateCombinedIntentBatch = async () => {
-    if (isSubmittingSettlement) {
-      return;
+  const buildSettlementBatchPayload = (input: {
+    campaignAddress: string;
+    grossSettlementUsdc: string;
+    platformFeeBps: string;
+    platformFeeRecipient: string;
+    profitDistributorAddress: string;
+  }) => {
+    if (!token) {
+      throw new Error('You must be logged in as an admin to submit intents.');
     }
-    setErrorMessage('');
-    setStatusMessage('Submitting settlement intents...');
-    setIsSubmittingSettlement(true);
-    try {
-      if (!token) {
-        throw new Error('You must be logged in as an admin to submit intents.');
-      }
-      if (!combinedForm.campaignAddress.trim()) {
-        throw new Error('Select a campaign for settlement.');
-      }
-      if (!selectedCombinedCampaign) {
-        throw new Error('Selected campaign is not available.');
-      }
-      if (!effectiveCombinedDistributor) {
-        throw new Error('Profit distributor is missing for selected campaign/property.');
-      }
-      const bps = Number(combinedForm.platformFeeBps);
-      if (!Number.isInteger(bps) || bps < 0 || bps > 2000) {
-        throw new Error('Platform fee bps must be an integer between 0 and 2000.');
-      }
-      if (bps > 0 && !effectiveCombinedRecipient) {
-        throw new Error('Platform fee recipient is required when fee is greater than 0.');
-      }
-      const checksumCampaignAddress = getAddress(combinedForm.campaignAddress.trim());
-      const checksumDistributorAddress = getAddress(effectiveCombinedDistributor);
-      const checksumRecipientAddress =
-        bps === 0 ? null : getAddress(effectiveCombinedRecipient);
-      await ensureSettlementIntentEligibility(checksumCampaignAddress, 'Settlement');
+    if (!input.campaignAddress.trim()) {
+      throw new Error('Select a campaign for settlement.');
+    }
+    const selectedCampaign =
+      campaigns.find((campaign) => campaign.campaignAddress === input.campaignAddress) ?? null;
+    if (!selectedCampaign) {
+      throw new Error('Selected campaign is not available.');
+    }
+    if (!input.profitDistributorAddress.trim()) {
+      throw new Error('Profit distributor is missing for selected campaign/property.');
+    }
+    const bps = Number(input.platformFeeBps);
+    if (!Number.isInteger(bps) || bps < 0 || bps > 2000) {
+      throw new Error('Platform fee bps must be an integer between 0 and 2000.');
+    }
+    if (bps > 0 && !input.platformFeeRecipient.trim()) {
+      throw new Error('Platform fee recipient is required when fee is greater than 0.');
+    }
+    const checksumCampaignAddress = getAddress(input.campaignAddress.trim());
+    const checksumDistributorAddress = getAddress(input.profitDistributorAddress.trim());
+    const checksumRecipientAddress = bps === 0 ? null : getAddress(input.platformFeeRecipient.trim());
+    const grossSettlementUsdc = Number(input.grossSettlementUsdc);
+    if (!Number.isFinite(grossSettlementUsdc) || grossSettlementUsdc <= 0) {
+      throw new Error('Gross settlement amount must be greater than 0.');
+    }
+    const feeUsdc = (grossSettlementUsdc * bps) / 10_000;
+    const netDistributionUsdc = grossSettlementUsdc - feeUsdc;
+    if (!Number.isFinite(netDistributionUsdc) || netDistributionUsdc <= 0) {
+      throw new Error('Net investor distribution must be greater than 0 after platform fee.');
+    }
+    return {
+      selectedCampaign,
+      checksumCampaignAddress,
+      checksumDistributorAddress,
+      checksumRecipientAddress,
+      grossSettlementUsdc,
+      feeUsdc,
+      netDistributionUsdc,
+      bps,
+      payload: {
+        chainId: 84532,
+        includeProfitIntent: true,
+        includePlatformFeeIntent: true,
+        propertyId: selectedCampaign.propertyId,
+        profitDistributorAddress: checksumDistributorAddress.toLowerCase(),
+        usdcAmountBaseUnits: Math.round(netDistributionUsdc * 1_000_000).toString(),
+        campaignAddress: checksumCampaignAddress.toLowerCase(),
+        platformFeeBps: bps,
+        platformFeeRecipient: bps === 0 ? null : checksumRecipientAddress?.toLowerCase(),
+        platformFeeUsdcAmountBaseUnits: Math.round(feeUsdc * 1_000_000).toString(),
+      } satisfies Parameters<typeof createAdminIntentBatch>[0],
+    };
+  };
 
-      const grossSettlementUsdc = Number(combinedForm.grossSettlementUsdc);
-      if (!Number.isFinite(grossSettlementUsdc) || grossSettlementUsdc <= 0) {
-        throw new Error('Gross settlement amount must be greater than 0.');
-      }
-
-      const feeUsdc = (grossSettlementUsdc * bps) / 10_000;
-      const netDistributionUsdc = grossSettlementUsdc - feeUsdc;
-      if (!Number.isFinite(netDistributionUsdc) || netDistributionUsdc <= 0) {
-        throw new Error('Net investor distribution must be greater than 0 after platform fee.');
-      }
+  const submitSettlementBatch = async (input: {
+    campaignAddress: string;
+    grossSettlementUsdc: string;
+    platformFeeBps: string;
+    platformFeeRecipient: string;
+    profitDistributorAddress: string;
+    skipRecentDuplicateGuard?: boolean;
+  }) => {
+    const built = buildSettlementBatchPayload(input);
+    await ensureSettlementIntentEligibility(built.checksumCampaignAddress, 'Settlement');
+    if (!input.skipRecentDuplicateGuard) {
       const duplicateSettlement = combinedHistory.find((entry) => {
         if (!entry.grossSettlementUsdc || !entry.platformFeeUsdc || !entry.netDistributionUsdc) {
           return false;
@@ -1012,10 +1071,10 @@ export default function OwnerConsole() {
         const recentEnough = Number.isFinite(createdMs) && Date.now() - createdMs < 5 * 60 * 1000;
         return (
           recentEnough &&
-          entry.campaignAddress.toLowerCase() === checksumCampaignAddress.toLowerCase() &&
-          entry.grossSettlementUsdc === grossSettlementUsdc.toFixed(6) &&
-          entry.platformFeeUsdc === feeUsdc.toFixed(6) &&
-          entry.netDistributionUsdc === netDistributionUsdc.toFixed(6)
+          entry.campaignAddress.toLowerCase() === built.checksumCampaignAddress.toLowerCase() &&
+          entry.grossSettlementUsdc === built.grossSettlementUsdc.toFixed(6) &&
+          entry.platformFeeUsdc === built.feeUsdc.toFixed(6) &&
+          entry.netDistributionUsdc === built.netDistributionUsdc.toFixed(6)
         );
       });
       if (duplicateSettlement) {
@@ -1023,17 +1082,56 @@ export default function OwnerConsole() {
           'Similar settlement was just submitted recently. Refresh statuses before submitting again.'
         );
       }
+    }
+    const response = await createAdminIntentBatch(built.payload, token as string);
+    const historyRecord: CombinedSubmissionRecord = {
+      id:
+        response.profitIntent?.id ||
+        response.platformFeeIntent?.id ||
+        `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      createdAt: new Date().toISOString(),
+      campaignAddress: built.checksumCampaignAddress.toLowerCase(),
+      propertyId: built.selectedCampaign.propertyId,
+      includeProfitIntent: true,
+      includePlatformFeeIntent: true,
+      profitIntentId: response.profitIntent?.id ?? null,
+      platformFeeIntentId: response.platformFeeIntent?.id ?? null,
+      grossSettlementUsdc: built.grossSettlementUsdc.toFixed(6),
+      platformFeeUsdc: built.feeUsdc.toFixed(6),
+      netDistributionUsdc: built.netDistributionUsdc.toFixed(6),
+      platformFeeRecipient: built.checksumRecipientAddress?.toLowerCase() ?? null,
+      profitDistributorAddress: built.checksumDistributorAddress.toLowerCase(),
+    };
+    persistCombinedHistory([historyRecord, ...combinedHistory].slice(0, 10));
+    return { response, built };
+  };
+
+  const handleCreateCombinedIntentBatch = async () => {
+    if (isSubmittingSettlement) {
+      return;
+    }
+    setErrorMessage('');
+    setStatusMessage('Submitting settlement intents...');
+    setIsSubmittingSettlement(true);
+    try {
+      const built = buildSettlementBatchPayload({
+        campaignAddress: combinedForm.campaignAddress,
+        grossSettlementUsdc: combinedForm.grossSettlementUsdc,
+        platformFeeBps: combinedForm.platformFeeBps,
+        platformFeeRecipient: effectiveCombinedRecipient,
+        profitDistributorAddress: effectiveCombinedDistributor,
+      });
       const confirmation = window.confirm(
         [
           'Confirm settlement submission',
           '',
-          `Campaign: ${checksumCampaignAddress}`,
-          `Property: ${selectedCombinedCampaign.propertyId}`,
-          `Gross settlement: ${grossSettlementUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`,
-          `Platform fee (${bps} bps): ${feeUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`,
-          `Net investor distribution: ${netDistributionUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`,
-          `Fee recipient: ${bps === 0 ? 'N/A (fee disabled)' : checksumRecipientAddress}`,
-          `Profit distributor: ${checksumDistributorAddress}`,
+          `Campaign: ${built.checksumCampaignAddress}`,
+          `Property: ${built.selectedCampaign.propertyId}`,
+          `Gross settlement: ${built.grossSettlementUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`,
+          `Platform fee (${built.bps} bps): ${built.feeUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`,
+          `Net investor distribution: ${built.netDistributionUsdc.toLocaleString(undefined, { maximumFractionDigits: 6 })} USDC`,
+          `Fee recipient: ${built.bps === 0 ? 'N/A (fee disabled)' : built.checksumRecipientAddress}`,
+          `Profit distributor: ${built.checksumDistributorAddress}`,
           '',
           'Proceed?',
         ].join('\n')
@@ -1042,21 +1140,13 @@ export default function OwnerConsole() {
         setStatusMessage('Settlement submission cancelled.');
         return;
       }
-
-      const payload: Parameters<typeof createAdminIntentBatch>[0] = {
-        chainId: 84532,
-        includeProfitIntent: true,
-        includePlatformFeeIntent: true,
-        propertyId: selectedCombinedCampaign.propertyId,
-        profitDistributorAddress: checksumDistributorAddress.toLowerCase(),
-        usdcAmountBaseUnits: Math.round(netDistributionUsdc * 1_000_000).toString(),
-        campaignAddress: checksumCampaignAddress.toLowerCase(),
-        platformFeeBps: bps,
-        platformFeeRecipient: bps === 0 ? null : checksumRecipientAddress?.toLowerCase(),
-        platformFeeUsdcAmountBaseUnits: Math.round(feeUsdc * 1_000_000).toString(),
-      };
-
-      const response = await createAdminIntentBatch(payload, token);
+      const { response } = await submitSettlementBatch({
+        campaignAddress: combinedForm.campaignAddress,
+        grossSettlementUsdc: combinedForm.grossSettlementUsdc,
+        platformFeeBps: combinedForm.platformFeeBps,
+        platformFeeRecipient: effectiveCombinedRecipient,
+        profitDistributorAddress: effectiveCombinedDistributor,
+      });
       const created: string[] = [];
       if (response.profitIntent) created.push('profit');
       if (response.platformFeeIntent) created.push('platform-fee');
@@ -1065,25 +1155,6 @@ export default function OwnerConsole() {
           ? `Settlement submit successful: ${created.join(' + ')} intent(s) created.`
           : 'Settlement submit completed.'
       );
-      const historyRecord: CombinedSubmissionRecord = {
-        id:
-          response.profitIntent?.id ||
-          response.platformFeeIntent?.id ||
-          `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        createdAt: new Date().toISOString(),
-        campaignAddress: checksumCampaignAddress.toLowerCase(),
-        propertyId: selectedCombinedCampaign.propertyId,
-        includeProfitIntent: true,
-        includePlatformFeeIntent: true,
-        profitIntentId: response.profitIntent?.id ?? null,
-        platformFeeIntentId: response.platformFeeIntent?.id ?? null,
-        grossSettlementUsdc: grossSettlementUsdc.toFixed(6),
-        platformFeeUsdc: feeUsdc.toFixed(6),
-        netDistributionUsdc: netDistributionUsdc.toFixed(6),
-        platformFeeRecipient: checksumRecipientAddress?.toLowerCase() ?? null,
-        profitDistributorAddress: checksumDistributorAddress.toLowerCase(),
-      };
-      persistCombinedHistory([historyRecord, ...combinedHistory].slice(0, 10));
 
       setCombinedForm((prev) => ({
         ...prev,
@@ -1095,8 +1166,8 @@ export default function OwnerConsole() {
       setShowCombinedIntentModal(false);
 
       void loadCampaigns();
-      await loadIntents(token);
-      await refreshCombinedProgress(token);
+      await loadIntents(token as string);
+      await refreshCombinedProgress(token as string);
     } catch (error) {
       setErrorMessage((error as Error).message);
       setStatusMessage('');
@@ -1764,6 +1835,43 @@ export default function OwnerConsole() {
     }
   };
 
+  const handleRepairCampaignSetup = async (campaignAddress: string) => {
+    if (!token) {
+      setErrorMessage('You must be logged in as an admin to manage campaigns.');
+      return;
+    }
+
+    const actionKey = `repair:${campaignAddress.toLowerCase()}`;
+    setCampaignLifecycleLoadingKey(actionKey);
+    setErrorMessage('');
+    setStatusMessage('Checking campaign setup...');
+    try {
+      const preflight = await loadCampaignLifecyclePreflight(campaignAddress);
+      if (preflight.campaign.state !== 'SUCCESS' && preflight.campaign.state !== 'WITHDRAWN') {
+        throw new Error(
+          `Repair blocked: campaign state is ${preflight.campaign.state}. Finalize/withdraw first.`
+        );
+      }
+      setStatusMessage('Submitting repair transaction...');
+      const result = await repairCampaignSetupAdmin(token, {
+        campaignAddress,
+        chainId: 84532,
+      });
+      setStatusMessage(
+        result.txHash
+          ? `Repair submitted: ${result.txHash}`
+          : result.message || 'Campaign setup already healthy.'
+      );
+      await Promise.all([loadCampaigns(), loadIntents(token)]);
+      await loadCampaignLifecyclePreflight(campaignAddress);
+    } catch (error) {
+      setErrorMessage((error as Error).message);
+      setStatusMessage('');
+    } finally {
+      setCampaignLifecycleLoadingKey(null);
+    }
+  };
+
   const handleCheckCampaignLifecycle = async (campaignAddress: string) => {
     if (!token) {
       setErrorMessage('You must be logged in as an admin to manage campaigns.');
@@ -1872,6 +1980,197 @@ export default function OwnerConsole() {
       setStatusMessage('');
     } finally {
       setIsSmartWithdrawRunning(false);
+    }
+  };
+
+  const createInitialFullSettlementSteps = (): FullSettlementStep[] => [
+    { key: 'precheck', label: 'Precheck campaign state', status: 'pending', message: 'Pending' },
+    { key: 'finalize', label: 'Finalize campaign (if needed)', status: 'pending', message: 'Pending' },
+    { key: 'withdraw', label: 'Withdraw campaign funds', status: 'pending', message: 'Pending' },
+    { key: 'repair', label: 'Repair setup (equity token mapping)', status: 'pending', message: 'Pending' },
+    { key: 'submit', label: 'Submit settlement intents', status: 'pending', message: 'Pending' },
+  ];
+
+  const updateFullSettlementStep = (
+    key: FullSettlementStep['key'],
+    status: FullSettlementStepState,
+    message: string
+  ) => {
+    setFullSettlementSteps((prev) =>
+      prev.map((step) => (step.key === key ? { ...step, status, message } : step))
+    );
+  };
+
+  const openFullSettlementModal = async (campaign: CampaignResponse) => {
+    const property = properties.find((item) => item.propertyId === campaign.propertyId) ?? null;
+    const latestForCampaign = combinedHistory.find(
+      (entry) => entry.campaignAddress.toLowerCase() === campaign.campaignAddress.toLowerCase()
+    );
+    let suggestedGross = '';
+    let suggestedSource = '';
+    if (latestForCampaign?.grossSettlementUsdc) {
+      const parsed = Number(latestForCampaign.grossSettlementUsdc);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        suggestedGross = formatUsdcInput(parsed);
+        suggestedSource = 'last settlement for this campaign';
+      }
+    }
+    if (!suggestedGross && property?.baseSellUsdcBaseUnits) {
+      const parsed = Number(property.baseSellUsdcBaseUnits) / 1_000_000;
+      if (Number.isFinite(parsed) && parsed > 0) {
+        suggestedGross = formatUsdcInput(parsed);
+        suggestedSource = 'property base sell estimate';
+      }
+    }
+    if (!suggestedGross && property?.estimatedSellUsdcBaseUnits) {
+      const parsed = Number(property.estimatedSellUsdcBaseUnits) / 1_000_000;
+      if (Number.isFinite(parsed) && parsed > 0) {
+        suggestedGross = formatUsdcInput(parsed);
+        suggestedSource = 'property estimated sell price';
+      }
+    }
+    if (!suggestedGross) {
+      const parsed = Number(campaign.targetUsdcBaseUnits) / 1_000_000;
+      if (Number.isFinite(parsed) && parsed > 0) {
+        suggestedGross = formatUsdcInput(parsed);
+        suggestedSource = 'campaign target raise';
+      }
+    }
+
+    setFullSettlementCampaign(campaign);
+    setFullSettlementRecipient(connectedWalletAddress || address || '');
+    setFullSettlementGrossUsdc(suggestedGross);
+    setFullSettlementGrossSource(suggestedSource);
+    setFullSettlementFeeBps(String(campaign.platformFeeBps ?? 0));
+    setFullSettlementFeeRecipient(campaign.platformFeeRecipient ?? '');
+    setFullSettlementDistributor(property?.profitDistributorAddress ?? '');
+    setFullSettlementPreflight(null);
+    setFullSettlementSteps(createInitialFullSettlementSteps());
+    setShowFullSettlementModal(true);
+    try {
+      const preflight = await loadCampaignLifecyclePreflight(campaign.campaignAddress);
+      setFullSettlementPreflight(preflight);
+      updateFullSettlementStep('precheck', 'done', 'Precheck loaded.');
+    } catch (error) {
+      updateFullSettlementStep('precheck', 'error', (error as Error).message);
+    }
+  };
+
+  const closeFullSettlementModal = () => {
+    if (isRunningFullSettlement) return;
+    setShowFullSettlementModal(false);
+    setFullSettlementCampaign(null);
+    setFullSettlementPreflight(null);
+    setFullSettlementGrossSource('');
+    setFullSettlementSteps([]);
+  };
+
+  const handleRunFullSettlement = async () => {
+    if (!token || !fullSettlementCampaign) {
+      setErrorMessage('You must be logged in as an admin to manage campaigns.');
+      return;
+    }
+    let recipient: string;
+    try {
+      recipient = getAddress(fullSettlementRecipient.trim());
+    } catch {
+      setErrorMessage('Recipient address is invalid.');
+      return;
+    }
+
+    setErrorMessage('');
+    setStatusMessage('Running full settlement...');
+    setIsRunningFullSettlement(true);
+    if (fullSettlementSteps.length === 0) {
+      setFullSettlementSteps(createInitialFullSettlementSteps());
+    }
+    let activeStep: FullSettlementStep['key'] = 'precheck';
+    try {
+      activeStep = 'precheck';
+      updateFullSettlementStep('precheck', 'running', 'Loading precheck...');
+      let preflight = await loadCampaignLifecyclePreflight(fullSettlementCampaign.campaignAddress);
+      setFullSettlementPreflight(preflight);
+      updateFullSettlementStep(
+        'precheck',
+        'done',
+        `State=${preflight.campaign.state}, campaign USDC=${(
+          Number(preflight.campaign.campaignUsdcBalanceBaseUnits) / 1_000_000
+        ).toLocaleString(undefined, { maximumFractionDigits: 6 })}`
+      );
+
+      activeStep = 'finalize';
+      if (preflight.actions.finalize.ready) {
+        updateFullSettlementStep('finalize', 'running', 'Submitting finalize transaction...');
+        const finalizeResult = await finalizeCampaignAdmin(token, {
+          campaignAddress: fullSettlementCampaign.campaignAddress,
+          chainId: 84532,
+        });
+        updateFullSettlementStep('finalize', 'done', `Finalize submitted: ${finalizeResult.txHash}`);
+        await Promise.all([loadCampaigns(), loadIntents(token)]);
+        preflight = await loadCampaignLifecyclePreflight(fullSettlementCampaign.campaignAddress);
+        setFullSettlementPreflight(preflight);
+      } else {
+        updateFullSettlementStep('finalize', 'skipped', 'Already finalized or not required.');
+      }
+
+      activeStep = 'withdraw';
+      if (!preflight.actions.withdraw.ready) {
+        throw new Error(
+          `Withdraw blocked: ${preflight.actions.withdraw.reasons.map(prettyLifecycleReason).join('; ')}`
+        );
+      }
+      updateFullSettlementStep('withdraw', 'running', 'Submitting withdraw transaction...');
+      const withdrawResult = await withdrawCampaignFundsAdmin(token, {
+        campaignAddress: fullSettlementCampaign.campaignAddress,
+        recipient,
+        chainId: 84532,
+      });
+      updateFullSettlementStep('withdraw', 'done', `Withdraw submitted: ${withdrawResult.txHash}`);
+      await Promise.all([loadCampaigns(), loadIntents(token)]);
+
+      activeStep = 'repair';
+      updateFullSettlementStep('repair', 'running', 'Repairing setup...');
+      const repairResult = await repairCampaignSetupAdmin(token, {
+        campaignAddress: fullSettlementCampaign.campaignAddress,
+        chainId: 84532,
+      });
+      updateFullSettlementStep(
+        'repair',
+        'done',
+        repairResult.txHash ? `Repair submitted: ${repairResult.txHash}` : repairResult.message
+      );
+      await Promise.all([loadCampaigns(), loadIntents(token)]);
+      preflight = await loadCampaignLifecyclePreflight(fullSettlementCampaign.campaignAddress);
+      setFullSettlementPreflight(preflight);
+
+      activeStep = 'submit';
+      updateFullSettlementStep('submit', 'running', 'Submitting settlement intents...');
+      const { response } = await submitSettlementBatch({
+        campaignAddress: fullSettlementCampaign.campaignAddress,
+        grossSettlementUsdc: fullSettlementGrossUsdc,
+        platformFeeBps: fullSettlementFeeBps,
+        platformFeeRecipient: fullSettlementFeeRecipient,
+        profitDistributorAddress: fullSettlementDistributor,
+        skipRecentDuplicateGuard: true,
+      });
+      const created: string[] = [];
+      if (response.platformFeeIntent) created.push('platform-fee');
+      if (response.profitIntent) created.push('profit');
+      updateFullSettlementStep(
+        'submit',
+        'done',
+        created.length > 0 ? `Created ${created.join(' + ')} intent(s).` : 'No intents were created.'
+      );
+      await loadIntents(token);
+      await refreshCombinedProgress(token);
+      setStatusMessage('Full settlement completed.');
+    } catch (error) {
+      const message = (error as Error).message;
+      setErrorMessage(message);
+      setStatusMessage('');
+      updateFullSettlementStep(activeStep, 'error', message);
+    } finally {
+      setIsRunningFullSettlement(false);
     }
   };
 
@@ -3059,6 +3358,153 @@ export default function OwnerConsole() {
             </div>
           )}
 
+          {showFullSettlementModal && fullSettlementCampaign && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-6">
+              <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-white/15 bg-slate-900/95 p-6 shadow-2xl shadow-black/50 backdrop-blur">
+                <div className="mb-4 flex items-start justify-between gap-4">
+                  <div>
+                    <h3 className="text-xl font-semibold text-white">Run Full Settlement</h3>
+                    <p className="mt-1 text-sm text-slate-400">
+                      {fullSettlementCampaign.propertyId} · {fullSettlementCampaign.campaignAddress}
+                    </p>
+                  </div>
+                  <button
+                    className="rounded border border-slate-600 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800/60 transition-all"
+                    onClick={closeFullSettlementModal}
+                    disabled={isRunningFullSettlement}
+                  >
+                    Close
+                  </button>
+                </div>
+
+                <div className="grid gap-3 rounded-lg border border-white/10 bg-slate-950/40 p-4 text-sm md:grid-cols-2">
+                  <label className="text-slate-300">
+                    Gross settlement (USDC)
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.000001"
+                      className="mt-1 w-full rounded border border-slate-700 bg-slate-900/60 px-3 py-2 text-white focus:border-cyan-500/60 focus:outline-none"
+                      value={fullSettlementGrossUsdc}
+                      onChange={(event) => setFullSettlementGrossUsdc(event.target.value)}
+                      disabled={isRunningFullSettlement}
+                    />
+                    {fullSettlementGrossSource && (
+                      <span className="mt-1 block text-xs text-slate-400">
+                        Suggested from {fullSettlementGrossSource}
+                      </span>
+                    )}
+                  </label>
+                  <label className="text-slate-300">
+                    Platform fee (bps)
+                    <input
+                      type="number"
+                      min="0"
+                      max="2000"
+                      step="1"
+                      className="mt-1 w-full rounded border border-slate-700 bg-slate-900/60 px-3 py-2 text-white focus:border-cyan-500/60 focus:outline-none"
+                      value={fullSettlementFeeBps}
+                      onChange={(event) => setFullSettlementFeeBps(event.target.value)}
+                      disabled={isRunningFullSettlement}
+                    />
+                  </label>
+                  <label className="text-slate-300">
+                    Platform fee recipient
+                    <input
+                      type="text"
+                      className="mt-1 w-full rounded border border-slate-700 bg-slate-900/60 px-3 py-2 text-white focus:border-cyan-500/60 focus:outline-none"
+                      value={fullSettlementFeeRecipient}
+                      onChange={(event) => setFullSettlementFeeRecipient(event.target.value)}
+                      disabled={isRunningFullSettlement}
+                    />
+                  </label>
+                  <label className="text-slate-300">
+                    Profit distributor
+                    <input
+                      type="text"
+                      className="mt-1 w-full rounded border border-slate-700 bg-slate-900/60 px-3 py-2 text-white focus:border-cyan-500/60 focus:outline-none"
+                      value={fullSettlementDistributor}
+                      onChange={(event) => setFullSettlementDistributor(event.target.value)}
+                      disabled={isRunningFullSettlement}
+                    />
+                  </label>
+                  <label className="text-slate-300 md:col-span-2">
+                    Withdraw recipient
+                    <input
+                      type="text"
+                      className="mt-1 w-full rounded border border-slate-700 bg-slate-900/60 px-3 py-2 text-white focus:border-cyan-500/60 focus:outline-none"
+                      value={fullSettlementRecipient}
+                      onChange={(event) => setFullSettlementRecipient(event.target.value)}
+                      disabled={isRunningFullSettlement}
+                    />
+                  </label>
+                </div>
+
+                {fullSettlementPreflight && (
+                  <div className="mt-3 rounded border border-white/10 bg-slate-950/40 p-3 text-xs text-slate-300">
+                    <p>
+                      State: <span className="text-white">{fullSettlementPreflight.campaign.state}</span> · Campaign balance:{' '}
+                      <span className="text-white">
+                        {(Number(fullSettlementPreflight.campaign.campaignUsdcBalanceBaseUnits) / 1_000_000).toLocaleString(undefined, {
+                          maximumFractionDigits: 6,
+                        })}{' '}
+                        USDC
+                      </span>
+                    </p>
+                    <p>
+                      Equity token: {fullSettlementPreflight.postSettlementHealth.equityTokenSet ? 'Configured' : 'Missing'} ·
+                      Claimable wallets: {fullSettlementPreflight.postSettlementHealth.equityClaimableWallets} equity,{' '}
+                      {fullSettlementPreflight.postSettlementHealth.profitClaimableWallets} profit
+                    </p>
+                  </div>
+                )}
+
+                <div className="mt-4 space-y-2 rounded-lg border border-white/10 bg-slate-950/50 p-4">
+                  {fullSettlementSteps.map((step) => (
+                    <div key={step.key} className="flex items-start justify-between gap-3 text-sm">
+                      <div className="text-slate-200">{step.label}</div>
+                      <div className="text-right">
+                        <div
+                          className={
+                            step.status === 'done'
+                              ? 'text-emerald-300'
+                              : step.status === 'running'
+                                ? 'text-cyan-300'
+                                : step.status === 'error'
+                                  ? 'text-red-300'
+                                  : step.status === 'skipped'
+                                    ? 'text-amber-300'
+                                    : 'text-slate-400'
+                          }
+                        >
+                          {step.status.toUpperCase()}
+                        </div>
+                        <div className="text-xs text-slate-400">{step.message}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-5 flex items-center justify-end gap-2">
+                  <button
+                    className="rounded border border-slate-600 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800/60 transition-all disabled:opacity-60"
+                    onClick={closeFullSettlementModal}
+                    disabled={isRunningFullSettlement}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="rounded border border-cyan-500/60 bg-cyan-500/15 px-3 py-2 text-sm font-medium text-cyan-200 hover:bg-cyan-500/25 transition-all disabled:opacity-60"
+                    onClick={() => void handleRunFullSettlement()}
+                    disabled={!canManageOwnerFlows || isRunningFullSettlement}
+                  >
+                    {isRunningFullSettlement ? 'Running...' : 'Run Full Settlement'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {canViewOwnerConsole && (
             <>
               {/* Property Catalog */}
@@ -3190,8 +3636,10 @@ export default function OwnerConsole() {
                             const raisedUsdc = Number(campaign.raisedUsdcBaseUnits) / 1_000_000;
                             const targetUsdc = Number(campaign.targetUsdcBaseUnits) / 1_000_000;
                             const campaignKey = campaign.campaignAddress.toLowerCase();
+                            const lifecycle = campaignLifecyclePreflightByAddress[campaignKey] ?? null;
                             const isChecking = campaignLifecycleLoadingKey === `check:${campaignKey}`;
                             const isFinalizing = campaignLifecycleLoadingKey === `finalize:${campaignKey}`;
+                            const isRepairing = campaignLifecycleLoadingKey === `repair:${campaignKey}`;
                             const isWithdrawing = campaignLifecycleLoadingKey === `withdraw:${campaignKey}`;
 
                             return (
@@ -3250,18 +3698,74 @@ export default function OwnerConsole() {
                                       {isFinalizing ? 'Finalizing...' : 'Finalize'}
                                     </button>
                                     <button
+                                      className="rounded border border-violet-500/50 bg-violet-500/10 px-2 py-1 text-xs text-violet-300 hover:bg-violet-500/20 disabled:opacity-60 transition-all"
+                                      onClick={() => void handleRepairCampaignSetup(campaign.campaignAddress)}
+                                      disabled={
+                                        !canManageOwnerFlows ||
+                                        (campaign.state !== 'SUCCESS' && campaign.state !== 'WITHDRAWN') ||
+                                        isChecking ||
+                                        isFinalizing ||
+                                        isRepairing ||
+                                        isWithdrawing
+                                      }
+                                    >
+                                      {isRepairing ? 'Repairing...' : 'Repair Setup'}
+                                    </button>
+                                    <button
                                       className="rounded border border-emerald-500/50 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-60 transition-all"
                                       onClick={() => void openSmartWithdrawModal(campaign)}
                                       disabled={
                                         !canManageOwnerFlows ||
                                         isChecking ||
                                         isFinalizing ||
+                                        isRepairing ||
                                         isWithdrawing
                                       }
                                     >
                                       {isWithdrawing ? 'Withdrawing...' : 'Withdraw'}
                                     </button>
+                                    <button
+                                      className="rounded border border-cyan-500/50 bg-cyan-500/10 px-2 py-1 text-xs text-cyan-300 hover:bg-cyan-500/20 disabled:opacity-60 transition-all"
+                                      onClick={() => void openFullSettlementModal(campaign)}
+                                      disabled={
+                                        !canManageOwnerFlows ||
+                                        isChecking ||
+                                        isFinalizing ||
+                                        isRepairing ||
+                                        isWithdrawing ||
+                                        isRunningFullSettlement
+                                      }
+                                    >
+                                      Run Full Settlement
+                                    </button>
                                   </div>
+                                  {lifecycle && (
+                                    <div className="mt-2 rounded border border-white/10 bg-slate-950/60 px-2 py-2 text-left text-[10px] text-slate-300">
+                                      <p className="font-semibold text-slate-200">Post-Settlement Health</p>
+                                      <p className="mt-1">
+                                        Equity token:{' '}
+                                        <span
+                                          className={
+                                            lifecycle.postSettlementHealth.equityTokenSet
+                                              ? 'text-emerald-300'
+                                              : 'text-amber-300'
+                                          }
+                                        >
+                                          {lifecycle.postSettlementHealth.equityTokenSet ? 'Configured' : 'Missing'}
+                                        </span>
+                                      </p>
+                                      <p>
+                                        Wallets: {lifecycle.postSettlementHealth.investorWallets} total,{' '}
+                                        {lifecycle.postSettlementHealth.equityClaimableWallets} equity-claimable,{' '}
+                                        {lifecycle.postSettlementHealth.profitClaimableWallets} profit-claimable
+                                      </p>
+                                      {lifecycle.postSettlementHealth.claimabilityReadErrors > 0 && (
+                                        <p className="text-amber-300">
+                                          Claim read warnings: {lifecycle.postSettlementHealth.claimabilityReadErrors}
+                                        </p>
+                                      )}
+                                    </div>
+                                  )}
                                 </td>
                               </tr>
                             );

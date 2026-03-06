@@ -151,6 +151,7 @@ export default function PropertyDetail() {
   const [pendingClaims, setPendingClaims] = useState<PendingClaim[]>([]);
   const [propertyEquityClaims, setPropertyEquityClaims] = useState<EquityClaimResponse[]>([]);
   const [propertyProfitClaims, setPropertyProfitClaims] = useState<ProfitClaimResponse[]>([]);
+  const [claimRefreshNonce, setClaimRefreshNonce] = useState(0);
 
   useEffect(() => {
     try {
@@ -262,13 +263,44 @@ export default function PropertyDetail() {
   const txInFlight = isInvesting || isClaimingEquity || isClaimingProfit || isClaimingRefund;
   const canClaimProfit = claimableProfitBaseUnits !== null && claimableProfitBaseUnits > 0n;
   const canClaimEquity = claimableEquityBaseUnits !== null && claimableEquityBaseUnits > 0n;
-  const claimProfitUnavailableMessage =
-    claimableProfitBaseUnits === null ? 'Unable to read claimable profit right now.' : 'No claimable profit yet.';
+  const hasInvestmentInConnectedWallet = myInvestedBaseUnits > 0n;
+  const isCampaignClaimPhase = campaignState === 'SUCCESS' || campaignState === 'WITHDRAWN';
+  const equityTokenMissing = claimableEquityError
+    .toLowerCase()
+    .includes('equity token is not configured');
+  const canAttemptEquityClaim =
+    hasInvestmentInConnectedWallet &&
+    isCampaignClaimPhase &&
+    !equityTokenMissing &&
+    (canClaimEquity || claimableEquityBaseUnits === null);
+  const shouldClaimEquityFirst =
+    hasInvestmentInConnectedWallet &&
+    (canClaimEquity || canAttemptEquityClaim) &&
+    claimableProfitBaseUnits !== null &&
+    claimableProfitBaseUnits <= 0n;
+  const claimProfitUnavailableMessage = !hasInvestmentInConnectedWallet
+    ? 'This connected wallet has no investment in this property.'
+    : shouldClaimEquityFirst
+      ? 'Claim equity first, then profit becomes claimable.'
+    : claimableProfitBaseUnits === null
+      ? 'Unable to read claimable profit right now.'
+      : 'No claimable profit yet.';
   const claimEquityUnavailableMessage = claimableEquityError
     ? claimableEquityError
+    : !hasInvestmentInConnectedWallet
+      ? 'This connected wallet has no investment in this property.'
+    : !isCampaignClaimPhase
+      ? 'Campaign must be finalized before equity can be claimed.'
     : claimableEquityBaseUnits === null
-      ? 'Unable to read claimable equity right now.'
+      ? 'Unable to read claimable equity right now. You can still try claiming.'
       : 'No claimable equity yet.';
+  const claimSequence = {
+    walletReady: walletAvailable,
+    hasInvestment: hasInvestmentInConnectedWallet,
+    campaignReady: isCampaignClaimPhase,
+    equityReady: canClaimEquity || canAttemptEquityClaim,
+    profitReady: canClaimProfit,
+  };
   const normalizedEthAmount = useMemo(() => Number(amountEth), [amountEth]);
   const normalizedSlippagePercent = useMemo(() => Number(slippagePercent), [slippagePercent]);
   const swapFeeCandidates = useMemo(() => {
@@ -576,7 +608,7 @@ export default function PropertyDetail() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [property?.propertyId]);
+  }, [claimRefreshNonce, property?.propertyId]);
 
   useEffect(() => {
     if (pendingClaims.length === 0) {
@@ -617,9 +649,10 @@ export default function PropertyDetail() {
       }
 
       try {
+        const injected = getEthereumProvider();
         const rpcUrl = (import.meta as ImportMeta & { env: Record<string, string> }).env
           .VITE_BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
-        const provider = new JsonRpcProvider(rpcUrl);
+        const provider = injected ? new BrowserProvider(injected as never) : new JsonRpcProvider(rpcUrl);
         const distributor = new Contract(
           property.profitDistributorAddress,
           PROFIT_DISTRIBUTOR_ABI,
@@ -645,7 +678,7 @@ export default function PropertyDetail() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [connectedAddress, property?.profitDistributorAddress]);
+  }, [claimRefreshNonce, connectedAddress, property?.profitDistributorAddress]);
 
   useEffect(() => {
     let cancelled = false;
@@ -658,9 +691,10 @@ export default function PropertyDetail() {
       }
 
       try {
+        const injected = getEthereumProvider();
         const rpcUrl = (import.meta as ImportMeta & { env: Record<string, string> }).env
           .VITE_BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org';
-        const provider = new JsonRpcProvider(rpcUrl);
+        const provider = injected ? new BrowserProvider(injected as never) : new JsonRpcProvider(rpcUrl);
         const crowdfund = new Contract(property.crowdfundAddress, CROWDFUND_ABI, provider);
         const claimable = (await crowdfund.claimableTokens(connectedAddress)) as bigint;
         if (!cancelled) {
@@ -689,7 +723,7 @@ export default function PropertyDetail() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [connectedAddress, property?.crowdfundAddress]);
+  }, [claimRefreshNonce, connectedAddress, property?.crowdfundAddress]);
 
   useEffect(() => {
     let cancelled = false;
@@ -725,7 +759,7 @@ export default function PropertyDetail() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [connectedAddress, property?.crowdfundAddress]);
+  }, [claimRefreshNonce, connectedAddress, property?.crowdfundAddress]);
 
   const handleInvestWithUsdc = async () => {
     setTxError('');
@@ -1226,7 +1260,7 @@ export default function PropertyDetail() {
       setTxError('Property is not loaded yet.');
       return;
     }
-    if (!canClaimEquity) {
+    if (!canAttemptEquityClaim) {
       setTxError(claimEquityUnavailableMessage);
       return;
     }
@@ -1239,6 +1273,7 @@ export default function PropertyDetail() {
       const tx = await sendContractTransaction(signer, crowdfund, 'claimTokens');
       await tx.wait();
       setTxStatus(`Equity claim confirmed: ${tx.hash}`);
+      setClaimRefreshNonce((current) => current + 1);
       emitPortfolioActivity({
         txHash: tx.hash,
         propertyId: property.propertyId,
@@ -1283,6 +1318,7 @@ export default function PropertyDetail() {
       await tx.wait();
       setTxStatus(`Profit claim confirmed: ${tx.hash}`);
       setClaimableProfitBaseUnits(0n);
+      setClaimRefreshNonce((current) => current + 1);
       emitPortfolioActivity({
         txHash: tx.hash,
         propertyId: property.propertyId,
@@ -1616,6 +1652,66 @@ export default function PropertyDetail() {
                   )}
                 </div>
 
+                <div className="mb-4 rounded-lg border border-slate-700/50 bg-slate-900/50 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                    Claim Sequence
+                  </p>
+                  <div className="mt-2 grid grid-cols-1 gap-2 text-xs">
+                    <div className="flex items-center justify-between rounded border border-slate-700/50 bg-slate-950/40 px-3 py-2">
+                      <span className="text-slate-300">1. Wallet + Investment</span>
+                      <span
+                        className={`rounded px-2 py-0.5 ${
+                          claimSequence.walletReady && claimSequence.hasInvestment
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : 'bg-amber-500/20 text-amber-300'
+                        }`}
+                      >
+                        {claimSequence.walletReady && claimSequence.hasInvestment ? 'Ready' : 'Pending'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between rounded border border-slate-700/50 bg-slate-950/40 px-3 py-2">
+                      <span className="text-slate-300">2. Campaign Finalized</span>
+                      <span
+                        className={`rounded px-2 py-0.5 ${
+                          claimSequence.campaignReady
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : 'bg-amber-500/20 text-amber-300'
+                        }`}
+                      >
+                        {claimSequence.campaignReady ? campaignState : 'Pending'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between rounded border border-slate-700/50 bg-slate-950/40 px-3 py-2">
+                      <span className="text-slate-300">3. Claim Equity</span>
+                      <span
+                        className={`rounded px-2 py-0.5 ${
+                          claimSequence.equityReady
+                            ? 'bg-blue-500/20 text-blue-300'
+                            : 'bg-slate-700 text-slate-300'
+                        }`}
+                      >
+                        {claimSequence.equityReady ? 'Available' : 'Waiting'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between rounded border border-slate-700/50 bg-slate-950/40 px-3 py-2">
+                      <span className="text-slate-300">4. Claim Profit</span>
+                      <span
+                        className={`rounded px-2 py-0.5 ${
+                          claimSequence.profitReady
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : 'bg-slate-700 text-slate-300'
+                        }`}
+                      >
+                        {claimSequence.profitReady
+                          ? 'Available'
+                          : shouldClaimEquityFirst
+                            ? 'Claim Equity First'
+                            : 'Waiting'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
                 {/* Alerts */}
                 {!walletAvailable && (
                   <div className="mb-4 rounded-lg bg-amber-500/10 border border-amber-500/30 px-4 py-3 text-amber-300 text-sm">
@@ -1688,12 +1784,12 @@ export default function PropertyDetail() {
                 <div className="space-y-2">
                   <button
                     onClick={handleClaimEquity}
-                    disabled={isClaimingEquity || !walletAvailable || txInFlight || !canClaimEquity}
+                    disabled={isClaimingEquity || !walletAvailable || txInFlight || !canAttemptEquityClaim}
                     className="w-full py-3 border border-slate-700 text-slate-300 font-medium rounded-lg hover:bg-slate-800/50 transition disabled:opacity-60"
                   >
                     {isClaimingEquity
                       ? 'Claiming...'
-                      : canClaimEquity
+                      : canClaimEquity || canAttemptEquityClaim
                         ? 'Claim Equity'
                         : 'No claimable equity'}
                   </button>
@@ -1704,6 +1800,8 @@ export default function PropertyDetail() {
                   >
                     {isClaimingProfit
                       ? 'Claiming...'
+                      : shouldClaimEquityFirst
+                        ? 'Claim Equity First'
                       : canClaimProfit
                         ? 'Claim Profit'
                         : 'No claimable profit'}
